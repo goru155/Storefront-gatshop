@@ -371,8 +371,20 @@ const StorefrontPage = () => {
       }
     } catch (err) {
       console.error('Firebase email signup failed:', err);
-      if (err.code === 'auth/invalid-email') {
+      const errCode = err?.code;
+
+      if (errCode === 'auth/invalid-email') {
         showToast('Please enter a valid email address.', 'error');
+      } else if (
+        errCode === 'auth/invalid-credential' ||
+        errCode === 'auth/wrong-password' ||
+        errCode === 'auth/user-not-found' ||
+        errCode === 'auth/operation-not-allowed'
+      ) {
+        showToast(
+          'Firebase Email/Password sign-up is not enabled for this project, or the app is using the wrong Firebase credentials. Check Firebase Console > Authentication > Sign-in method and confirm the app config matches the same Firebase project.',
+          'error'
+        );
       } else {
         showToast('Unable to process this email right now. Please try again.', 'error');
       }

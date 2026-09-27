@@ -14,14 +14,33 @@ import {
 import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAawUopX1lromd5nFeMPoogEXFzLZ7ZnXM",
-  authDomain: "shopportal-f6630.firebaseapp.com",
-  projectId: "shopportal-f6630",
-  storageBucket: "shopportal-f6630.firebasestorage.app",
-  messagingSenderId: "843668522089",
-  appId: "1:843668522089:web:cfdd7548303ced6df04ef8",
-  measurementId: "G-3P0EWBDSLW"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
+
+const requiredConfigKeys = [
+  'apiKey',
+  'authDomain',
+  'projectId',
+  'storageBucket',
+  'messagingSenderId',
+  'appId'
+];
+
+const missingConfigKeys = requiredConfigKeys.filter(
+  (key) => !firebaseConfig[key] || !String(firebaseConfig[key]).trim()
+);
+
+if (missingConfigKeys.length > 0) {
+  throw new Error(
+    `Missing Firebase configuration values: ${missingConfigKeys.join(', ')}. Add them to your .env file using VITE_FIREBASE_* variables.`
+  );
+}
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
