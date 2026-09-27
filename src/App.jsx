@@ -45,6 +45,7 @@ const StorefrontPage = () => {
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('featured');
+  const [isSearchPopupOpen, setIsSearchPopupOpen] = useState(false);
 
   // Dynamic Categories strictly derived from Database Products & Admin Categories
   const dynamicCategories = useMemo(() => {
@@ -266,6 +267,11 @@ const StorefrontPage = () => {
     }
   };
 
+  const handleSearchSubmit = () => {
+    setIsSearchPopupOpen(false);
+    scrollToProducts();
+  };
+
   // Trigger Checkout
   const handleProceedToCheckout = () => {
     if (cart.length === 0) {
@@ -483,6 +489,18 @@ const StorefrontPage = () => {
           </div>
 
           <div className="nav-actions">
+            <button
+              className="mobile-search-button"
+              type="button"
+              onClick={() => setIsSearchPopupOpen(true)}
+              aria-label="Open product search"
+              title="Search products"
+            >
+              <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </button>
+
             {/* 20-Min Cart Session Timer */}
             {timeLeft > 0 && (
               <div className={`timer-chip ${isTimerWarning ? 'warning' : ''}`} title="Cart session timer (auto-clears on expiration)">
@@ -513,6 +531,70 @@ const StorefrontPage = () => {
           </div>
         </nav>
       </header>
+
+      {isSearchPopupOpen && (
+        <div className="search-popup-overlay" onClick={() => setIsSearchPopupOpen(false)}>
+          <div className="search-popup-card" onClick={(e) => e.stopPropagation()}>
+            <div className="search-popup-header">
+              <h3>Search Products</h3>
+              <button type="button" className="search-popup-close" onClick={() => setIsSearchPopupOpen(false)} aria-label="Close search">✕</button>
+            </div>
+
+            <div className="search-popup-subtitle">Find products, categories, and delivery essentials.</div>
+
+            <div className="nav-search search-popup-search">
+              <svg className="search-icon-svg" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              <input
+                type="text"
+                autoFocus
+                placeholder="Search products by name, category..."
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  scrollToProducts();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleSearchSubmit();
+                  }
+                }}
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="search-clear-button"
+                  title="Clear search"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div className="search-popup-actions">
+              <button
+                type="button"
+                className="search-popup-secondary"
+                onClick={() => {
+                  setSearchQuery('');
+                  setIsSearchPopupOpen(false);
+                }}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="search-popup-primary"
+                onClick={handleSearchSubmit}
+              >
+                Search
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===================================================================
           Main Storefront Body
