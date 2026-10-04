@@ -102,6 +102,8 @@ const StorefrontPage = () => {
   const [enteredOtp, setEnteredOtp] = useState(['', '', '', '', '', '']);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const explicitSignOutRef = useRef(false);
+  const customerSyncRequestRef = useRef(0);
 
   const normalizeCustomerName = (name, email) => {
     const trimmedName = String(name || '').trim();
@@ -122,9 +124,11 @@ const StorefrontPage = () => {
   const syncCustomerNameFromEmail = async (email) => {
     const targetEmail = String(email || '').trim();
     if (!targetEmail) return;
+    const requestId = ++customerSyncRequestRef.current;
 
     try {
       const customerSnap = await getDocs(collection(db, 'customers'));
+      if (requestId !== customerSyncRequestRef.current || explicitSignOutRef.current) return;
       const match = customerSnap.docs.find(docSnap => {
         const data = docSnap.data() || {};
         const existingEmail = String(data.email || '').trim().toLowerCase();
@@ -174,15 +178,18 @@ const StorefrontPage = () => {
   const handleCloseProfileModal = () => setIsProfileModalOpen(false);
 
   const handleSignOutProfile = async () => {
+    explicitSignOutRef.current = true;
+    customerSyncRequestRef.current += 1;
+
     try {
-      if (auth.currentUser) {
-        await auth.signOut();
-      }
+      await auth.signOut();
       setVerifiedCustomer(null);
-      setCustomerForm(prev => ({ ...prev, name: '', email: '', contact: '', password: '', address: '' }));
+      sessionStorage.removeItem('shop_storefront_customer');
+      setCustomerForm({ name: '', email: '', contact: '', password: '', address: '' });
       setIsProfileModalOpen(false);
       showToast('Signed out successfully.', 'success');
     } catch (error) {
+      explicitSignOutRef.current = false;
       console.error('Profile sign-out failed:', error);
       showToast('Unable to sign out right now.', 'error');
     }
@@ -191,6 +198,13 @@ const StorefrontPage = () => {
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged((user) => {
       if (!user) {
+        if (explicitSignOutRef.current) {
+          customerSyncRequestRef.current += 1;
+          setVerifiedCustomer(null);
+          setCustomerForm({ name: '', email: '', contact: '', password: '', address: '' });
+          return;
+        }
+
         setCustomerForm(prev => ({
           ...prev,
           email: verifiedCustomer?.email || '',
@@ -200,6 +214,7 @@ const StorefrontPage = () => {
         return;
       }
 
+      explicitSignOutRef.current = false;
       const resolvedEmail = user.email || '';
       const fallbackName = user.displayName || resolvedEmail.split('@')[0] || 'Customer';
 
@@ -296,6 +311,7 @@ const StorefrontPage = () => {
   // Real Firebase email signup + email verification for checkout.
   const handleSendOtp = async (e) => {
     e.preventDefault();
+    explicitSignOutRef.current = false;
     if (!customerForm.name || !customerForm.email || !customerForm.address) {
       showToast("Please fill in your name, email, and delivery address.", "warning");
       return;
@@ -331,44 +347,42 @@ const StorefrontPage = () => {
         return;
       }
 
+      let userCredential;
       try {
-        const signInUser = await signInWithEmailAndPassword(
+        userCredential = await createUserWithEmailAndPassword(
           auth,
           customerForm.email,
           customerForm.password
         );
-
-        if (signInUser.user.emailVerified) {
-          setOtpStep(2);
-          showToast('Your email is already verified. You can continue.', 'success');
-          return;
+      } catch (createErr) {
+        if (createErr.code !== 'auth/email-already-in-use') {
+          throw createErr;
         }
 
-        await sendEmailVerification(signInUser.user);
-        setOtpStep(2);
-        showToast(`Verification email sent to ${customerForm.email}. Please verify before finishing checkout.`, "info");
-        return;
-      } catch (signInErr) {
-        if (signInErr.code === 'auth/user-not-found') {
-          const userCredential = await createUserWithEmailAndPassword(
+        try {
+          userCredential = await signInWithEmailAndPassword(
             auth,
             customerForm.email,
             customerForm.password
           );
-
-          await sendEmailVerification(userCredential.user);
-          setOtpStep(2);
-          showToast(`Verification email sent to ${customerForm.email}. Please verify before finishing checkout.`, "info");
-          return;
+        } catch (signInErr) {
+          if (signInErr.code === 'auth/invalid-credential' || signInErr.code === 'auth/wrong-password') {
+            showToast('An account already exists for this email, but the password did not match.', 'error');
+            return;
+          }
+          throw signInErr;
         }
-
-        if (signInErr.code === 'auth/wrong-password') {
-          showToast('The password for this email is incorrect. Please try again.', 'error');
-          return;
-        }
-
-        throw signInErr;
       }
+
+      if (userCredential.user.emailVerified) {
+        setOtpStep(2);
+        showToast('Your email is already verified. You can continue.', 'success');
+        return;
+      }
+
+      await sendEmailVerification(userCredential.user);
+      setOtpStep(2);
+      showToast(`Verification email sent to ${customerForm.email}. Please verify before finishing checkout.`, "info");
     } catch (err) {
       console.error('Firebase email signup failed:', err);
       const errCode = err?.code;
@@ -376,15 +390,14 @@ const StorefrontPage = () => {
       if (errCode === 'auth/invalid-email') {
         showToast('Please enter a valid email address.', 'error');
       } else if (
-        errCode === 'auth/invalid-credential' ||
-        errCode === 'auth/wrong-password' ||
-        errCode === 'auth/user-not-found' ||
         errCode === 'auth/operation-not-allowed'
       ) {
         showToast(
-          'Firebase Email/Password sign-up is not enabled for this project, or the app is using the wrong Firebase credentials. Check Firebase Console > Authentication > Sign-in method and confirm the app config matches the same Firebase project.',
+          'Email/Password sign-in is disabled for this Firebase project. Enable it in Firebase Console > Authentication > Sign-in method.',
           'error'
         );
+      } else if (errCode?.includes('identity-toolkit-api-has-not-been-used')) {
+        showToast('Firebase Identity Toolkit API is disabled for this project. Enable it in Google Cloud Console, then retry.', 'error');
       } else {
         showToast('Unable to process this email right now. Please try again.', 'error');
       }
