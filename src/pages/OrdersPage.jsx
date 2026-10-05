@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { onAuthStateChanged } from 'firebase/auth';
 import { collection, onSnapshot, query, orderBy, updateDoc, doc, serverTimestamp } from 'firebase/firestore';
-import { db } from '../firebase/config';
+import { auth, db } from '../firebase/config';
+
+const ADMIN_EMAIL = 'admin@shop.com';
 
 const STATUS_OPTIONS = [
   'new',
@@ -46,22 +49,47 @@ const formatDate = (value) => {
 export default function OrdersPage() {
   const [orders, setOrders] = useState([]);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [ordersError, setOrdersError] = useState('');
 
   useEffect(() => {
-    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const list = snapshot.docs.map(docSnap => ({
-        id: docSnap.id,
-        ...docSnap.data()
-      }));
-      setOrders(list);
-
-      if (!selectedOrderId && list.length > 0) {
-        setSelectedOrderId(list[0].orderId);
+    let unsubscribeOrders = null;
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (unsubscribeOrders) {
+        unsubscribeOrders();
+        unsubscribeOrders = null;
       }
+
+      const authorized = user?.email?.toLowerCase() === ADMIN_EMAIL;
+      setIsAuthReady(true);
+      setIsAdmin(authorized);
+      setOrdersError('');
+
+      if (!authorized) {
+        setOrders([]);
+        setSelectedOrderId(null);
+        return;
+      }
+
+      const ordersQuery = query(collection(db, 'orders'), orderBy('createdAt', 'desc'));
+      unsubscribeOrders = onSnapshot(ordersQuery, (snapshot) => {
+        const list = snapshot.docs.map(docSnap => ({
+          id: docSnap.id,
+          ...docSnap.data()
+        }));
+        setOrders(list);
+        setSelectedOrderId(current => current || list[0]?.orderId || null);
+      }, (error) => {
+        console.error('Unable to load orders:', error);
+        setOrdersError(error.code || 'unknown Firestore error');
+      });
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeOrders) unsubscribeOrders();
+    };
   }, []);
 
   const selectedOrder = useMemo(
@@ -78,6 +106,24 @@ export default function OrdersPage() {
       updatedAt: serverTimestamp()
     });
   };
+
+  if (!isAuthReady || !isAdmin || ordersError) {
+    const message = !isAuthReady
+      ? 'Checking admin access...'
+      : !isAdmin
+        ? 'Sign in with the authorized admin account to view orders.'
+        : `Unable to load orders (${ordersError}). Check the deployed Firestore rules.`;
+
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: '#f8fafc', color: '#0f172a', padding: '2rem' }}>
+        <div>
+          <h1>Orders</h1>
+          <p>{message}</p>
+          <Link to="/">Back to storefront</Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', color: '#0f172a', padding: '2rem 1.5rem 3rem' }}>

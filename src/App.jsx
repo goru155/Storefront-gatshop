@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Routes, Route, Link, NavLink } from 'react-router-dom';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { createUserWithEmailAndPassword, sendEmailVerification, signInWithEmailAndPassword } from 'firebase/auth';
 import { auth, db } from './firebase/config';
 
@@ -10,6 +10,16 @@ import { auth, db } from './firebase/config';
 import { useCart } from './context/CartContext';
 import { getCategoryIcon } from './firebase/config';
 import OrdersPage from './pages/OrdersPage';
+
+const CUSTOMER_DRAFT_STORAGE_KEY = 'shop_storefront_customer_draft';
+
+const readCustomerDraft = () => {
+  try {
+    return JSON.parse(localStorage.getItem(CUSTOMER_DRAFT_STORAGE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+};
 
 const StorefrontPage = () => {
   const {
@@ -92,18 +102,40 @@ const StorefrontPage = () => {
 
   // OTP Modal State
   const [otpStep, setOtpStep] = useState(1);
-  const [customerForm, setCustomerForm] = useState({
-    name: verifiedCustomer?.name || '',
-    contact: verifiedCustomer?.contact || '',
-    email: verifiedCustomer?.email || '',
-    password: '',
-    address: verifiedCustomer?.address || ''
+  const [customerForm, setCustomerForm] = useState(() => {
+    const draft = readCustomerDraft();
+    return {
+      name: draft.name || verifiedCustomer?.name || '',
+      contact: draft.contact || verifiedCustomer?.contact || '',
+      email: draft.email || verifiedCustomer?.email || '',
+      password: '',
+      address: draft.address || verifiedCustomer?.address || ''
+    };
   });
   const [enteredOtp, setEnteredOtp] = useState(['', '', '', '', '', '']);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const explicitSignOutRef = useRef(false);
   const customerSyncRequestRef = useRef(0);
+
+  useEffect(() => {
+    const draft = {
+      name: customerForm.name,
+      contact: customerForm.contact,
+      email: customerForm.email,
+      address: customerForm.address
+    };
+
+    try {
+      if (Object.values(draft).some(value => String(value || '').trim())) {
+        localStorage.setItem(CUSTOMER_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+      } else {
+        localStorage.removeItem(CUSTOMER_DRAFT_STORAGE_KEY);
+      }
+    } catch (error) {
+      console.warn('Unable to save customer form draft:', error);
+    }
+  }, [customerForm.name, customerForm.contact, customerForm.email, customerForm.address]);
 
   const normalizeCustomerName = (name, email) => {
     const trimmedName = String(name || '').trim();
@@ -123,17 +155,20 @@ const StorefrontPage = () => {
 
   const syncCustomerNameFromEmail = async (email) => {
     const targetEmail = String(email || '').trim();
-    if (!targetEmail) return;
+    const signedInEmail = String(auth.currentUser?.email || '').trim();
+    if (!targetEmail || !signedInEmail || targetEmail.toLowerCase() !== signedInEmail.toLowerCase()) return;
     const requestId = ++customerSyncRequestRef.current;
 
     try {
-      const customerSnap = await getDocs(collection(db, 'customers'));
+      const customerSnap = await getDocs(query(
+        collection(db, 'customers'),
+        where('email', '==', signedInEmail)
+      ));
       if (requestId !== customerSyncRequestRef.current || explicitSignOutRef.current) return;
       const match = customerSnap.docs.find(docSnap => {
         const data = docSnap.data() || {};
         const existingEmail = String(data.email || '').trim().toLowerCase();
-        const existingContact = String(data.contact || '').trim().toLowerCase();
-        return existingEmail === targetEmail.toLowerCase() || existingContact === targetEmail.toLowerCase();
+        return existingEmail === signedInEmail.toLowerCase();
       });
 
       if (!match) return;
@@ -185,6 +220,7 @@ const StorefrontPage = () => {
       await auth.signOut();
       setVerifiedCustomer(null);
       sessionStorage.removeItem('shop_storefront_customer');
+      localStorage.removeItem(CUSTOMER_DRAFT_STORAGE_KEY);
       setCustomerForm({ name: '', email: '', contact: '', password: '', address: '' });
       setIsProfileModalOpen(false);
       showToast('Signed out successfully.', 'success');

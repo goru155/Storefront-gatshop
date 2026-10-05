@@ -2,20 +2,56 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.email == 'admin@shop.com';
+    }
+
+    function isVerifiedCustomer() {
+      return signedIn() && request.auth.token.email_verified == true;
+    }
+
+    match /inventory/{productId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
     match /products/{productId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if isAdmin();
     }
 
     match /categories/{categoryId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if isAdmin();
     }
 
     match /orders/{orderId} {
-      allow read, write: if true;
+      allow create: if isVerifiedCustomer()
+        && request.resource.data.keys().hasAll(['orderId', 'orderStatus', 'customer', 'items', 'pricing'])
+        && request.resource.data.orderStatus == 'new'
+        && request.resource.data.customer is map
+        && request.resource.data.customer.email == request.auth.token.email
+        && request.resource.data.items is list
+        && request.resource.data.pricing is map;
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /customers/{customerId} {
+      allow get, list: if isAdmin()
+        || (signedIn() && resource.data.email == request.auth.token.email);
+      allow create, update, delete: if isAdmin();
+
+      match /ledger/{entryId} {
+        allow read, write: if isAdmin();
+      }
     }
 
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

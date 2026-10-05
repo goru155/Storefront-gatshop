@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { db, INITIAL_PRODUCTS, getCategoryFallbackImage } from '../firebase/config';
+import { auth, db, INITIAL_PRODUCTS, getCategoryFallbackImage } from '../firebase/config';
 import { collection, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
 
 const CartContext = createContext();
@@ -24,7 +24,7 @@ const clearSessionMemory = () => {
 export function CartProvider({ children }) {
   // 1. Inventory State with Real-time synchronization from Firestore
   const [products, setProducts] = useState(INITIAL_PRODUCTS);
-  const [pendingReservations, setPendingReservations] = useState({});
+  const pendingReservations = {};
   const [adminCategories, setAdminCategories] = useState([]);
   const [isDbConnected, setIsDbConnected] = useState(false);
 
@@ -84,7 +84,6 @@ export function CartProvider({ children }) {
   useEffect(() => {
     let unsubscribeInv = null;
     let unsubscribeCats = null;
-    let unsubscribeOrders = null;
 
     try {
       const invRef = collection(db, 'inventory');
@@ -119,28 +118,6 @@ export function CartProvider({ children }) {
         setProducts(INITIAL_PRODUCTS);
       });
 
-      unsubscribeOrders = onSnapshot(collection(db, 'orders'), (snapshot) => {
-        const nextReservations = {};
-
-        snapshot.forEach(docSnap => {
-          const data = docSnap.data() || {};
-          const status = String(data.orderStatus || 'new').toLowerCase();
-          if (!['pending', 'new'].includes(status)) return;
-
-          const items = Array.isArray(data.items) ? data.items : [];
-          items.forEach(item => {
-            const productId = item?.productId || item?.id;
-            const qty = Number(item?.quantity || 0);
-            if (!productId || qty <= 0) return;
-            nextReservations[productId] = (nextReservations[productId] || 0) + qty;
-          });
-        });
-
-        setPendingReservations(nextReservations);
-      }, (err) => {
-        console.warn('Unable to sync pending order reservations:', err);
-      });
-
       // Listen to Firestore categories collection (from Admin category manager)
       const catsRef = collection(db, 'categories');
       unsubscribeCats = onSnapshot(catsRef, (snapshot) => {
@@ -156,7 +133,6 @@ export function CartProvider({ children }) {
     return () => {
       if (unsubscribeInv) unsubscribeInv();
       if (unsubscribeCats) unsubscribeCats();
-      if (unsubscribeOrders) unsubscribeOrders();
     };
   }, []);
 
@@ -485,7 +461,7 @@ export function CartProvider({ children }) {
         customer: {
           name: customerData.name,
           contact: normalizedContact,
-          email: customerData.email || '',
+          email: auth.currentUser?.email || customerData.email || '',
           deliveryAddress: customerData.address
         },
         items: cart.map(item => ({
@@ -513,7 +489,15 @@ export function CartProvider({ children }) {
         });
       } catch (firestoreError) {
         console.error('Failed to save order to Firestore:', firestoreError);
-        showToast("Checkout failed because inventory changed while placing this order.", 'error');
+        if (firestoreError?.code === 'permission-denied') {
+          showToast('Order not saved: Firestore denied this write. Check the deployed rules for signed-in customer order creation. Your cart is still available.', 'error');
+        } else if (firestoreError?.code === 'unauthenticated') {
+          showToast('Order not saved: please sign in again, then retry. Your cart is still available.', 'error');
+        } else if (firestoreError?.code === 'unavailable') {
+          showToast('Order not saved: Firestore is temporarily unavailable. Check your connection and retry; your cart is still available.', 'error');
+        } else {
+          showToast(`Order not saved (${firestoreError?.code || 'unknown Firestore error'}). Your cart is still available.`, 'error');
+        }
         return false;
       }
 
