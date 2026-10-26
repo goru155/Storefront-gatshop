@@ -10,6 +10,7 @@ import { auth, db } from './firebase/config';
 import { useCart } from './context/CartContext';
 import { getCategoryIcon } from './firebase/config';
 import OrdersPage from './pages/OrdersPage';
+import LoginModal from './components/LoginModal';
 
 const CUSTOMER_DRAFT_STORAGE_KEY = 'shop_storefront_customer_draft';
 
@@ -115,6 +116,7 @@ const StorefrontPage = () => {
   const [enteredOtp, setEnteredOtp] = useState(['', '', '', '', '', '']);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const explicitSignOutRef = useRef(false);
   const customerSyncRequestRef = useRef(0);
 
@@ -198,15 +200,27 @@ const StorefrontPage = () => {
   const hasActiveProfile = Boolean(auth.currentUser || verifiedCustomer?.email);
   const isCurrentCustomerVerified = !!auth.currentUser && !!auth.currentUser.emailVerified && auth.currentUser.email === customerForm.email;
 
+  const handleOpenLoginModal = () => {
+    setIsOtpModalOpen(false);
+    setIsProfileModalOpen(false);
+    setIsLoginModalOpen(true);
+  };
+
+  const handleCloseLoginModal = () => {
+    setIsLoginModalOpen(false);
+  };
+
   const handleProfileButtonClick = () => {
     if (hasActiveProfile) {
       setIsOtpModalOpen(false);
+      setIsLoginModalOpen(false);
       setIsProfileModalOpen(true);
       return;
     }
 
     setOtpStep(1);
     setIsProfileModalOpen(false);
+    setIsLoginModalOpen(false);
     setIsOtpModalOpen(true);
   };
 
@@ -583,12 +597,31 @@ const StorefrontPage = () => {
             </button>
 
             {/* Verification / Account Button */}
-            <button
-              className="btn-auth"
-              onClick={handleProfileButtonClick}
-            >
-              {hasActiveProfile ? `Hi, ${currentUserName.split(' ')[0]}` : (auth.currentUser ? 'Verify Email' : 'Sign Up')}
-            </button>
+            {hasActiveProfile ? (
+              <button
+                className="btn-auth"
+                onClick={handleProfileButtonClick}
+              >
+                {`Hi, ${currentUserName.split(' ')[0]}`}
+              </button>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <button
+                  type="button"
+                  className="btn-auth-outline"
+                  onClick={handleOpenLoginModal}
+                >
+                  Log In
+                </button>
+                <button
+                  type="button"
+                  className="btn-auth"
+                  onClick={handleProfileButtonClick}
+                >
+                  Sign Up
+                </button>
+              </div>
+            )}
           </div>
         </nav>
       </header>
@@ -946,6 +979,22 @@ const StorefrontPage = () => {
                 <button className="btn-checkout-cta" onClick={handleProceedToCheckout}>
                   Proceed to Checkout →
                 </button>
+
+                {!hasActiveProfile && (
+                  <div style={{ textAlign: 'center', fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
+                    Already a member?{' '}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCartOpen(false);
+                        handleOpenLoginModal();
+                      }}
+                      style={{ background: 'none', border: 'none', color: 'var(--accent-honey)', fontWeight: 700, cursor: 'pointer', padding: 0 }}
+                    >
+                      Log In
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1075,6 +1124,22 @@ const StorefrontPage = () => {
                     {isCurrentCustomerVerified ? 'Continue →' : (auth.currentUser ? 'Send Verification Email →' : 'Send Verification Code →')}
                   </button>
                 </div>
+
+                {!auth.currentUser && (
+                  <div style={{ marginTop: '1.25rem', textAlign: 'center', fontSize: '0.86rem', color: 'var(--text-muted)' }}>
+                    Already have an account?{' '}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsOtpModalOpen(false);
+                        setIsLoginModalOpen(true);
+                      }}
+                      style={{ background: 'none', border: 'none', color: 'var(--accent-honey)', fontWeight: 700, cursor: 'pointer', padding: 0 }}
+                    >
+                      Log In
+                    </button>
+                  </div>
+                )}
               </form>
             )}
 
@@ -1152,6 +1217,21 @@ const StorefrontPage = () => {
           </div>
         </div>
       )}
+
+      {/* ===================================================================
+          Customer Email & Password Login Modal
+          =================================================================== */}
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onClose={handleCloseLoginModal}
+        onSwitchToSignUp={() => {
+          setOtpStep(1);
+          setIsOtpModalOpen(true);
+        }}
+        showToast={showToast}
+        auth={auth}
+        initialEmail={customerForm.email}
+      />
 
       {/* ===================================================================
           Toast Notifications Container
