@@ -474,6 +474,7 @@ const StorefrontPage = () => {
     try {
       if (auth.currentUser) {
         await auth.currentUser.reload();
+        await auth.currentUser.getIdToken(true);
       }
 
       if (!auth.currentUser || !auth.currentUser.emailVerified) {

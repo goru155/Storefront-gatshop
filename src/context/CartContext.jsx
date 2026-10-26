@@ -451,6 +451,8 @@ export function CartProvider({ children }) {
         ? `+91${digitsOnly}`
         : (emailValue || contactValue || '');
 
+      const resolvedCustomerEmail = String(auth.currentUser?.email || customerData.email || '').trim();
+
       const orderPayload = {
         orderId: 'ORD-' + Math.floor(100000 + Math.random() * 900000),
         timestamp: new Date().toISOString(),
@@ -461,7 +463,7 @@ export function CartProvider({ children }) {
         customer: {
           name: customerData.name,
           contact: normalizedContact,
-          email: auth.currentUser?.email || customerData.email || '',
+          email: resolvedCustomerEmail,
           deliveryAddress: customerData.address
         },
         items: cart.map(item => ({
@@ -482,6 +484,14 @@ export function CartProvider({ children }) {
       };
 
       try {
+        if (auth.currentUser) {
+          try {
+            await auth.currentUser.getIdToken(true);
+          } catch (tokenErr) {
+            console.warn('Could not refresh ID token prior to order submission:', tokenErr);
+          }
+        }
+
         await addDoc(collection(db, 'orders'), {
           ...orderPayload,
           createdAt: orderPayload.createdAt,
