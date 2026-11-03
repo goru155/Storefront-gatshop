@@ -11,6 +11,9 @@ import { useCart } from './context/CartContext';
 import { getCategoryIcon } from './firebase/config';
 import OrdersPage from './pages/OrdersPage';
 import LoginModal from './components/LoginModal';
+import SignUpModal from './components/SignUpModal';
+import { getCurrentPosition, isWithinDeliveryArea, DELIVERY_RADIUS_KM } from './utils/geofence';
+import { reverseGeocodeCoords } from './utils/mapboxGeocode';
 
 const CUSTOMER_DRAFT_STORAGE_KEY = 'shop_storefront_customer_draft';
 
@@ -48,6 +51,7 @@ const StorefrontPage = () => {
     setIsOtpModalOpen,
     lastOrderSuccess,
     pendingReservations,
+    shopSettings,
     toasts,
     showToast
   } = useCart();
@@ -55,8 +59,17 @@ const StorefrontPage = () => {
   // Search & Filter State
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('featured');
   const [isSearchPopupOpen, setIsSearchPopupOpen] = useState(false);
+
+  // Debounce search query updates (300ms) to prevent per-keystroke re-filtering overhead
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   // Dynamic Categories strictly derived from Database Products & Admin Categories
   const dynamicCategories = useMemo(() => {
@@ -115,8 +128,11 @@ const StorefrontPage = () => {
   });
   const [enteredOtp, setEnteredOtp] = useState(['', '', '', '', '', '']);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
+  const [isCheckingLocation, setIsCheckingLocation] = useState(false);
+  const [customerLocation, setCustomerLocation] = useState(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [isSignUpModalOpen, setIsSignUpModalOpen] = useState(false);
   const explicitSignOutRef = useRef(false);
   const customerSyncRequestRef = useRef(0);
 
@@ -203,6 +219,7 @@ const StorefrontPage = () => {
   const handleOpenLoginModal = () => {
     setIsOtpModalOpen(false);
     setIsProfileModalOpen(false);
+    setIsSignUpModalOpen(false);
     setIsLoginModalOpen(true);
   };
 
@@ -210,18 +227,74 @@ const StorefrontPage = () => {
     setIsLoginModalOpen(false);
   };
 
+  const handleOpenSignUpModal = () => {
+    setIsOtpModalOpen(false);
+    setIsProfileModalOpen(false);
+    setIsLoginModalOpen(false);
+    setIsSignUpModalOpen(true);
+  };
+
+  const handleCloseSignUpModal = () => {
+    setIsSignUpModalOpen(false);
+  };
+
   const handleProfileButtonClick = () => {
     if (hasActiveProfile) {
       setIsOtpModalOpen(false);
       setIsLoginModalOpen(false);
+      setIsSignUpModalOpen(false);
       setIsProfileModalOpen(true);
       return;
     }
 
-    setOtpStep(1);
-    setIsProfileModalOpen(false);
-    setIsLoginModalOpen(false);
-    setIsOtpModalOpen(true);
+    handleOpenSignUpModal();
+  };
+
+  // Handle customer registration from SignUpModal
+  const handleSignUpSubmit = async ({ name, email, password, address, coords }) => {
+    try {
+      let userCredential;
+      try {
+        userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      } catch (createErr) {
+        if (createErr.code === 'auth/email-already-in-use') {
+          // If already registered, attempt sign-in
+          userCredential = await signInWithEmailAndPassword(auth, email, password);
+        } else {
+          throw createErr;
+        }
+      }
+
+      const user = userCredential.user;
+      await sendEmailVerification(user);
+
+      // Save customer details into local state & draft
+      setCustomerForm({
+        name,
+        email,
+        contact: email,
+        password: '',
+        address,
+      });
+
+      if (coords) {
+        setCustomerLocation({
+          lat: coords.lat,
+          lng: coords.lng,
+          distanceKm: isWithinDeliveryArea(coords.lat, coords.lng, { lat: shopSettings?.lat, lng: shopSettings?.lng }, shopSettings?.radiusKm || DELIVERY_RADIUS_KM).distanceKm
+        });
+      }
+
+      setIsSignUpModalOpen(false);
+      showToast('🎉 Account created! A verification link was sent to your email.', 'success');
+    } catch (err) {
+      console.error('Sign-up error:', err);
+      let msg = 'Failed to create account.';
+      if (err.code === 'auth/weak-password') msg = 'Password should be at least 6 characters.';
+      if (err.code === 'auth/invalid-email') msg = 'Invalid email address.';
+      if (err.code === 'auth/email-already-in-use') msg = 'This email is already in use. Try logging in.';
+      showToast(msg, 'error');
+    }
   };
 
   const handleCloseProfileModal = () => setIsProfileModalOpen(false);
@@ -299,7 +372,7 @@ const StorefrontPage = () => {
 
   // Filtered & Sorted Products
   const filteredProducts = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
+    const q = debouncedSearchQuery.toLowerCase().trim();
     return products
       .filter(p => {
         const matchesCategory = selectedCategory === 'all' || 
@@ -322,7 +395,7 @@ const StorefrontPage = () => {
         if (sortBy === 'rating') return (b.rating || 0) - (a.rating || 0);
         return 0;
       });
-  }, [products, selectedCategory, searchQuery, sortBy]);
+  }, [products, selectedCategory, debouncedSearchQuery, sortBy]);
 
   // Scroll to Products Section
   const scrollToProducts = () => {
@@ -337,17 +410,62 @@ const StorefrontPage = () => {
     scrollToProducts();
   };
 
-  // Trigger Checkout
-  const handleProceedToCheckout = () => {
+  // Trigger Checkout with Geofence Location Validation
+  const handleProceedToCheckout = async () => {
     if (cart.length === 0) {
       showToast("Your cart is empty!", "error");
       return;
     }
 
-    setOtpStep(1);
-    setEnteredOtp(['', '', '', '', '', '']);
-    setIsCartOpen(false);
-    setIsOtpModalOpen(true);
+    if (isCheckingLocation) return;
+
+    setIsCheckingLocation(true);
+    showToast("📍 Verifying delivery location...", "info");
+
+    try {
+      const coords = await getCurrentPosition();
+      const shopCoords = { lat: shopSettings?.lat, lng: shopSettings?.lng };
+      const maxRadius = shopSettings?.radiusKm || DELIVERY_RADIUS_KM;
+      const { allowed, distanceKm } = isWithinDeliveryArea(coords.lat, coords.lng, shopCoords, maxRadius);
+
+      if (!allowed) {
+        showToast(
+          `🛑 Delivery unavailable – you are ${distanceKm.toFixed(1)} km away, outside the ${maxRadius} km delivery zone. Order cannot be placed.`,
+          "error"
+        );
+        setIsCheckingLocation(false);
+        return;
+      }
+
+      setCustomerLocation({
+        lat: coords.lat,
+        lng: coords.lng,
+        distanceKm,
+      });
+
+      // Auto-fill delivery address from reverse geocoded coordinates
+      try {
+        const resolvedAddr = await reverseGeocodeCoords(coords.lat, coords.lng);
+        if (resolvedAddr) {
+          setCustomerForm(prev => ({
+            ...prev,
+            address: resolvedAddr,
+          }));
+        }
+      } catch (geocodeErr) {
+        console.warn('Could not reverse geocode checkout coords:', geocodeErr);
+      }
+
+      showToast(`📍 Delivery location confirmed (${distanceKm} km away).`, "success");
+      setIsCheckingLocation(false);
+      setOtpStep(1);
+      setEnteredOtp(['', '', '', '', '', '']);
+      setIsCartOpen(false);
+      setIsOtpModalOpen(true);
+    } catch (err) {
+      setIsCheckingLocation(false);
+      showToast(`📍 ${err.message}`, "error");
+    }
   };
 
   const handleCloseOtpModal = () => {
@@ -488,7 +606,8 @@ const StorefrontPage = () => {
         ...customerForm,
         name: normalizeCustomerName(customerForm.name, customerForm.email),
         contact: customerForm.contact || customerForm.email,
-        email: customerForm.email
+        email: customerForm.email,
+        location: customerLocation || null
       };
 
       setVerifiedCustomer(normalizedCustomer);
@@ -617,7 +736,7 @@ const StorefrontPage = () => {
                 <button
                   type="button"
                   className="btn-auth"
-                  onClick={handleProfileButtonClick}
+                  onClick={handleOpenSignUpModal}
                 >
                   Sign Up
                 </button>
@@ -977,8 +1096,13 @@ const StorefrontPage = () => {
                   <span>₹{cartTotal.toFixed(2)}</span>
                 </div>
 
-                <button className="btn-checkout-cta" onClick={handleProceedToCheckout}>
-                  Proceed to Checkout →
+                <button
+                  className="btn-checkout-cta"
+                  onClick={handleProceedToCheckout}
+                  disabled={isCheckingLocation}
+                  style={isCheckingLocation ? { opacity: 0.7, cursor: 'not-allowed' } : {}}
+                >
+                  {isCheckingLocation ? '📍 Checking Delivery Area...' : 'Proceed to Checkout →'}
                 </button>
 
                 {!hasActiveProfile && (
@@ -1110,11 +1234,18 @@ const StorefrontPage = () => {
                   <input
                     type="text"
                     required
+                    readOnly={Boolean(customerLocation)}
                     className="form-input"
                     placeholder="e.g. 124 Main Street, Apartment 4B"
                     value={customerForm.address}
                     onChange={(e) => setCustomerForm({ ...customerForm, address: e.target.value })}
+                    style={customerLocation ? { backgroundColor: 'var(--bg-mist, #f8fafc)', cursor: 'not-allowed' } : {}}
                   />
+                  {customerLocation && (
+                    <span style={{ fontSize: '0.78rem', color: '#16a34a', marginTop: '0.25rem', display: 'block' }}>
+                      🔒 Location confirmed ({customerLocation.distanceKm} km from shop)
+                    </span>
+                  )}
                 </div>
 
                 <div className="modal-actions">
@@ -1226,12 +1357,25 @@ const StorefrontPage = () => {
         isOpen={isLoginModalOpen}
         onClose={handleCloseLoginModal}
         onSwitchToSignUp={() => {
-          setOtpStep(1);
-          setIsOtpModalOpen(true);
+          setIsLoginModalOpen(false);
+          setIsSignUpModalOpen(true);
         }}
         showToast={showToast}
         auth={auth}
         initialEmail={customerForm.email}
+      />
+
+      {/* ===================================================================
+          Customer Sign-Up Modal (with Real-time Location, Search & Map)
+          =================================================================== */}
+      <SignUpModal
+        isOpen={isSignUpModalOpen}
+        onClose={handleCloseSignUpModal}
+        onSwitchToLogin={() => {
+          setIsSignUpModalOpen(false);
+          setIsLoginModalOpen(true);
+        }}
+        onSignUpSuccess={handleSignUpSubmit}
       />
 
       {/* ===================================================================

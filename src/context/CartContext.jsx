@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { auth, db, INITIAL_PRODUCTS, getCategoryFallbackImage } from '../firebase/config';
-import { collection, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
 
 const CartContext = createContext();
 
@@ -24,9 +24,15 @@ const clearSessionMemory = () => {
 export function CartProvider({ children }) {
   // 1. Inventory State with Real-time synchronization from Firestore
   const [products, setProducts] = useState(INITIAL_PRODUCTS);
-  const pendingReservations = {};
+  const [pendingReservations, setPendingReservations] = useState({});
   const [adminCategories, setAdminCategories] = useState([]);
   const [isDbConnected, setIsDbConnected] = useState(false);
+  const [shopSettings, setShopSettings] = useState({
+    lat: parseFloat(import.meta.env.VITE_SHOP_LAT) || 28.6139,
+    lng: parseFloat(import.meta.env.VITE_SHOP_LNG) || 77.2090,
+    radiusKm: parseFloat(import.meta.env.VITE_DELIVERY_RADIUS_KM) || 5,
+    address: 'Shop Physical Store',
+  });
 
   // 2. Cart Items State from sessionStorage
   const [cart, setCart] = useState(() => {
@@ -66,7 +72,7 @@ export function CartProvider({ children }) {
 
   // Toast notification helper
   const showToast = useCallback((message, type = 'info') => {
-    const id = Date.now() + Math.random();
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
     setToasts(prev => [...prev, { id, message, type }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
@@ -84,6 +90,7 @@ export function CartProvider({ children }) {
   useEffect(() => {
     let unsubscribeInv = null;
     let unsubscribeCats = null;
+    let unsubscribeShop = null;
 
     try {
       const invRef = collection(db, 'inventory');
@@ -126,6 +133,25 @@ export function CartProvider({ children }) {
           setAdminCategories(cats);
         }
       }, (err) => {});
+
+      // Listen to Firestore shop settings (Admin manual location setup)
+      const shopDocRef = doc(db, 'settings', 'shop');
+      unsubscribeShop = onSnapshot(shopDocRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (typeof data.lat === 'number' && typeof data.lng === 'number') {
+            setShopSettings({
+              lat: data.lat,
+              lng: data.lng,
+              radiusKm: Number(data.radiusKm) || 5,
+              address: data.address || '',
+              updatedAt: data.updatedAt || null,
+            });
+          }
+        }
+      }, (err) => {
+        console.warn('Could not read remote shop location settings:', err);
+      });
     } catch (e) {
       setProducts(INITIAL_PRODUCTS);
     }
@@ -133,6 +159,7 @@ export function CartProvider({ children }) {
     return () => {
       if (unsubscribeInv) unsubscribeInv();
       if (unsubscribeCats) unsubscribeCats();
+      if (unsubscribeShop) unsubscribeShop();
     };
   }, []);
 
@@ -309,18 +336,25 @@ export function CartProvider({ children }) {
   // Generate and download a proper invoice PDF for the placed order
   const downloadOrderBill = async (orderData) => {
     try {
-      if (!window.jspdf?.jsPDF) {
-        await new Promise((resolve, reject) => {
-          const script = document.createElement('script');
-          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
-          script.onload = resolve;
-          script.onerror = () => reject(new Error('Failed to load jsPDF'));
-          document.head.appendChild(script);
-        });
+      let jsPDFClass = window.jspdf?.jsPDF;
+      if (!jsPDFClass) {
+        try {
+          const mod = await import('jspdf');
+          jsPDFClass = mod.jsPDF || mod.default;
+        } catch {
+          // Fallback to CDN script if local dynamic import fails
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+            script.onload = resolve;
+            script.onerror = () => reject(new Error('Failed to load jsPDF'));
+            document.head.appendChild(script);
+          });
+          jsPDFClass = window.jspdf?.jsPDF;
+        }
       }
 
-      const { jsPDF } = window.jspdf;
-      const doc = new jsPDF();
+      const doc = new jsPDFClass();
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const margin = 15;
@@ -464,7 +498,8 @@ export function CartProvider({ children }) {
           name: customerData.name,
           contact: normalizedContact,
           email: resolvedCustomerEmail,
-          deliveryAddress: customerData.address
+          deliveryAddress: customerData.address,
+          location: customerData.location || null
         },
         items: cart.map(item => ({
           productId: item.id,
@@ -564,6 +599,8 @@ export function CartProvider({ children }) {
       lastOrderSuccess,
       setLastOrderSuccess,
       pendingReservations,
+      setPendingReservations,
+      shopSettings,
       toasts,
       showToast
     }}>
