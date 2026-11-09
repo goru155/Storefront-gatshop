@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { auth, db, INITIAL_PRODUCTS, getCategoryFallbackImage } from '../firebase/config';
 import { collection, doc, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
+import { DEFAULT_SHOP_LOCATION, DEFAULT_DELIVERY_RADIUS_KM } from '../config/geoConfig';
 
 const CartContext = createContext();
 
@@ -28,10 +29,10 @@ export function CartProvider({ children }) {
   const [adminCategories, setAdminCategories] = useState([]);
   const [isDbConnected, setIsDbConnected] = useState(false);
   const [shopSettings, setShopSettings] = useState({
-    lat: parseFloat(import.meta.env.VITE_SHOP_LAT) || 28.6139,
-    lng: parseFloat(import.meta.env.VITE_SHOP_LNG) || 77.2090,
-    radiusKm: parseFloat(import.meta.env.VITE_DELIVERY_RADIUS_KM) || 5,
-    address: 'Shop Physical Store',
+    lat: DEFAULT_SHOP_LOCATION.lat,
+    lng: DEFAULT_SHOP_LOCATION.lng,
+    radiusKm: DEFAULT_DELIVERY_RADIUS_KM,
+    address: DEFAULT_SHOP_LOCATION.address || 'Shop Physical Store',
   });
 
   // 2. Cart Items State from sessionStorage

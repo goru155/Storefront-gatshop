@@ -3,6 +3,9 @@ import { Link } from 'react-router-dom';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, onSnapshot, query, where, orderBy, updateDoc, setDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../firebase/config';
+import { DEFAULT_SHOP_LOCATION, DEFAULT_DELIVERY_RADIUS_KM } from '../config/geoConfig';
+import { geocodeAddress, reverseGeocodeCoords } from '../utils/mapboxGeocode';
+import { getDistanceKm } from '../utils/geofence';
 
 const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL || 'admin@shop.com';
 
@@ -57,12 +60,13 @@ export default function OrdersPage() {
   // Admin Shop Location & Boundary Setup state
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [shopSettings, setShopSettings] = useState({
-    lat: 28.6139,
-    lng: 77.2090,
-    radiusKm: 5,
-    address: 'Main Shop'
+    lat: DEFAULT_SHOP_LOCATION.lat,
+    lng: DEFAULT_SHOP_LOCATION.lng,
+    radiusKm: DEFAULT_DELIVERY_RADIUS_KM,
+    address: DEFAULT_SHOP_LOCATION.address || 'Main Shop'
   });
   const [isSavingLocation, setIsSavingLocation] = useState(false);
+  const [isGeocodingAddress, setIsGeocodingAddress] = useState(false);
   const [locationStatusMsg, setLocationStatusMsg] = useState({ text: '', type: '' });
 
   useEffect(() => {
@@ -130,9 +134,9 @@ export default function OrdersPage() {
           if (docSnap.exists()) {
             const data = docSnap.data();
             setShopSettings({
-              lat: typeof data.lat === 'number' ? data.lat : 28.6139,
-              lng: typeof data.lng === 'number' ? data.lng : 77.2090,
-              radiusKm: typeof data.radiusKm === 'number' ? data.radiusKm : 5,
+              lat: typeof data.lat === 'number' ? data.lat : DEFAULT_SHOP_LOCATION.lat,
+              lng: typeof data.lng === 'number' ? data.lng : DEFAULT_SHOP_LOCATION.lng,
+              radiusKm: typeof data.radiusKm === 'number' ? data.radiusKm : DEFAULT_DELIVERY_RADIUS_KM,
               address: data.address || '',
               updatedAt: data.updatedAt || null
             });
@@ -166,6 +170,57 @@ export default function OrdersPage() {
     });
   };
 
+  const handleGeocodeStoreAddress = async () => {
+    const addressToFind = shopSettings.address?.trim();
+    if (!addressToFind) {
+      setLocationStatusMsg({ text: 'Please enter a shop address to locate.', type: 'error' });
+      return;
+    }
+    setIsGeocodingAddress(true);
+    setLocationStatusMsg({ text: '🔍 Geocoding shop address...', type: 'info' });
+    try {
+      const res = await geocodeAddress(addressToFind);
+      setShopSettings(prev => ({
+        ...prev,
+        lat: Math.round(res.lat * 100000) / 100000,
+        lng: Math.round(res.lng * 100000) / 100000,
+        address: res.formatted || prev.address,
+      }));
+      setLocationStatusMsg({
+        text: `✅ Address located: ${res.formatted || `${res.lat}, ${res.lng}`}`,
+        type: 'success'
+      });
+    } catch (err) {
+      setLocationStatusMsg({
+        text: `Could not geocode address: ${err.message}`,
+        type: 'error'
+      });
+    } finally {
+      setIsGeocodingAddress(false);
+    }
+  };
+
+  const handleReverseGeocodeStoreCoords = async (customLat, customLng) => {
+    const latToUse = customLat !== undefined ? parseFloat(customLat) : parseFloat(shopSettings.lat);
+    const lngToUse = customLng !== undefined ? parseFloat(customLng) : parseFloat(shopSettings.lng);
+
+    if (isNaN(latToUse) || isNaN(lngToUse) || latToUse < -90 || latToUse > 90 || lngToUse < -180 || lngToUse > 180) {
+      setLocationStatusMsg({ text: 'Please enter valid numerical coordinates to autofill address.', type: 'error' });
+      return;
+    }
+
+    setLocationStatusMsg({ text: '🔍 Autofilling address from coordinates...', type: 'info' });
+    try {
+      const address = await reverseGeocodeCoords(latToUse, lngToUse);
+      if (address) {
+        setShopSettings(prev => ({ ...prev, address }));
+        setLocationStatusMsg({ text: `📍 Address autofilled: ${address}`, type: 'success' });
+      }
+    } catch (err) {
+      setLocationStatusMsg({ text: `Could not autofill address: ${err.message}`, type: 'error' });
+    }
+  };
+
   const handleDetectGPS = () => {
     if (!navigator.geolocation) {
       setLocationStatusMsg({ text: 'Geolocation is not supported by this browser.', type: 'error' });
@@ -173,13 +228,29 @@ export default function OrdersPage() {
     }
     setLocationStatusMsg({ text: 'Acquiring GPS coordinates...', type: 'info' });
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
+      async (pos) => {
+        const detectedLat = Math.round(pos.coords.latitude * 100000) / 100000;
+        const detectedLng = Math.round(pos.coords.longitude * 100000) / 100000;
         setShopSettings(prev => ({
           ...prev,
-          lat: Math.round(pos.coords.latitude * 100000) / 100000,
-          lng: Math.round(pos.coords.longitude * 100000) / 100000,
+          lat: detectedLat,
+          lng: detectedLng,
         }));
-        setLocationStatusMsg({ text: '📍 Coordinates detected from device GPS!', type: 'success' });
+        setLocationStatusMsg({ text: '📍 Coordinates detected! Resolving address...', type: 'info' });
+        try {
+          const resolvedAddress = await reverseGeocodeCoords(detectedLat, detectedLng);
+          if (resolvedAddress) {
+            setShopSettings(prev => ({
+              ...prev,
+              lat: detectedLat,
+              lng: detectedLng,
+              address: resolvedAddress
+            }));
+            setLocationStatusMsg({ text: `✅ GPS detected and address autofilled: ${resolvedAddress}`, type: 'success' });
+          }
+        } catch {
+          setLocationStatusMsg({ text: '📍 Coordinates detected from device GPS!', type: 'success' });
+        }
       },
       (err) => {
         setLocationStatusMsg({ text: `GPS error: ${err.message}`, type: 'error' });
@@ -194,13 +265,41 @@ export default function OrdersPage() {
     setIsSavingLocation(true);
     setLocationStatusMsg({ text: '', type: '' });
 
-    const latNum = parseFloat(shopSettings.lat);
-    const lngNum = parseFloat(shopSettings.lng);
-    const radiusNum = parseFloat(shopSettings.radiusKm);
+    let latNum = parseFloat(shopSettings.lat);
+    let lngNum = parseFloat(shopSettings.lng);
+    let radiusNum = parseFloat(shopSettings.radiusKm);
 
-    if (isNaN(latNum) || isNaN(lngNum) || isNaN(radiusNum) || radiusNum <= 0) {
+    if (isNaN(radiusNum) || radiusNum <= 0) {
+      radiusNum = DEFAULT_DELIVERY_RADIUS_KM || 5;
+    }
+
+    // Auto-geocode address if coordinates are missing but address is provided
+    if ((isNaN(latNum) || isNaN(lngNum)) && shopSettings.address?.trim()) {
+      try {
+        setLocationStatusMsg({ text: '🔍 Geocoding shop address...', type: 'info' });
+        const res = await geocodeAddress(shopSettings.address.trim());
+        latNum = Math.round(res.lat * 100000) / 100000;
+        lngNum = Math.round(res.lng * 100000) / 100000;
+        setShopSettings(prev => ({
+          ...prev,
+          lat: latNum,
+          lng: lngNum,
+          radiusKm: radiusNum,
+          address: res.formatted || prev.address
+        }));
+      } catch (geoErr) {
+        setLocationStatusMsg({
+          text: `Could not geocode address: ${geoErr.message}. Please enter coordinates manually.`,
+          type: 'error'
+        });
+        setIsSavingLocation(false);
+        return;
+      }
+    }
+
+    if (isNaN(latNum) || isNaN(lngNum)) {
       setLocationStatusMsg({
-        text: 'Please enter valid numerical coordinates and a positive radius (km).',
+        text: 'Please enter a shop address to locate or provide numerical latitude and longitude.',
         type: 'error'
       });
       setIsSavingLocation(false);
@@ -215,7 +314,7 @@ export default function OrdersPage() {
         address: shopSettings.address || '',
         updatedAt: serverTimestamp(),
         updatedBy: auth.currentUser?.email || ADMIN_EMAIL
-      });
+      }, { merge: true });
 
       setLocationStatusMsg({
         text: '✅ Shop location & delivery boundary saved successfully!',
@@ -227,8 +326,11 @@ export default function OrdersPage() {
       }, 1400);
     } catch (err) {
       console.error('Failed to save shop settings:', err);
+      const isPermError = err.code === 'permission-denied' || err.message?.includes('permissions');
       setLocationStatusMsg({
-        text: `Error saving: ${err.message}`,
+        text: isPermError
+          ? `Permission denied: Signed in as '${auth.currentUser?.email || 'none'}'. Ensure you are logged in as '${ADMIN_EMAIL}' and Firestore rules permit writes to /settings/shop.`
+          : `Error saving: ${err.message}`,
         type: 'error'
       });
     } finally {
@@ -392,11 +494,17 @@ export default function OrdersPage() {
                       <strong>₹{Number(order.pricing?.grandTotal || 0).toFixed(2)}</strong>
                     </div>
 
-                    {isAdmin && order.customer?.location && (
-                      <div style={{ marginTop: '0.4rem', fontSize: '0.75rem', color: '#16a34a', fontWeight: 600 }}>
-                        📍 {order.customer.location.distanceKm} km away
-                      </div>
-                    )}
+                    {isAdmin && order.customer?.location && (() => {
+                      const dist = typeof order.customer.location.lat === 'number' && typeof order.customer.location.lng === 'number'
+                        ? Math.round(getDistanceKm(shopSettings.lat, shopSettings.lng, order.customer.location.lat, order.customer.location.lng) * 10) / 10
+                        : Number(order.customer.location.distanceKm) || 0;
+                      const isOutOfZone = dist > (Number(shopSettings.radiusKm) || 5);
+                      return (
+                        <div style={{ marginTop: '0.4rem', fontSize: '0.75rem', color: isOutOfZone ? '#dc2626' : '#16a34a', fontWeight: 600 }}>
+                          {isOutOfZone ? `⚠️ Out of Zone (${dist} km)` : `📍 ${dist} km away`}
+                        </div>
+                      );
+                    })()}
                   </button>
                 ))
               )}
@@ -466,19 +574,48 @@ export default function OrdersPage() {
                     <div style={{ marginTop: '0.45rem', color: '#334155' }}>{formatDate(selectedOrder.timestamp || selectedOrder.createdAt || selectedOrder.updatedAt)}</div>
                   </div>
 
-                  {selectedOrder.customer?.location && (
-                    <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '12px', padding: '0.9rem' }}>
-                      <div style={{ color: '#166534', fontSize: '0.76rem', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700 }}>
-                        📍 Verified Distance
+                  {selectedOrder.customer?.location && (() => {
+                    const dist = typeof selectedOrder.customer.location.lat === 'number' && typeof selectedOrder.customer.location.lng === 'number'
+                      ? Math.round(getDistanceKm(shopSettings.lat, shopSettings.lng, selectedOrder.customer.location.lat, selectedOrder.customer.location.lng) * 10) / 10
+                      : Number(selectedOrder.customer.location.distanceKm) || 0;
+                    const isOutOfZone = dist > (Number(shopSettings.radiusKm) || 5);
+                    return (
+                      <div style={{
+                        background: isOutOfZone ? '#fef2f2' : '#f0fdf4',
+                        border: `1px solid ${isOutOfZone ? '#fecaca' : '#bbf7d0'}`,
+                        borderRadius: '12px',
+                        padding: '0.9rem'
+                      }}>
+                        <div style={{
+                          color: isOutOfZone ? '#991b1b' : '#166534',
+                          fontSize: '0.76rem',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.08em',
+                          fontWeight: 700
+                        }}>
+                          {isOutOfZone ? '⚠️ Delivery Boundary Warning' : '📍 Verified Distance'}
+                        </div>
+                        <div style={{
+                          fontWeight: 800,
+                          fontSize: '1.3rem',
+                          color: isOutOfZone ? '#dc2626' : '#166534',
+                          marginTop: '0.35rem'
+                        }}>
+                          {dist} km away
+                        </div>
+                        <div style={{
+                          color: isOutOfZone ? '#b91c1c' : '#16a34a',
+                          fontSize: '0.74rem',
+                          marginTop: '0.2rem',
+                          fontWeight: 600
+                        }}>
+                          {isOutOfZone
+                            ? `Out of delivery radius (Max: ${shopSettings.radiusKm} km)`
+                            : `Within ${shopSettings.radiusKm} km delivery zone`}
+                        </div>
                       </div>
-                      <div style={{ fontWeight: 800, fontSize: '1.3rem', color: '#166534', marginTop: '0.35rem' }}>
-                        {selectedOrder.customer.location.distanceKm} km away
-                      </div>
-                      <div style={{ color: '#16a34a', fontSize: '0.74rem', marginTop: '0.2rem' }}>
-                        Within delivery zone
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
 
                 <div style={{ marginBottom: '1.2rem' }}>
@@ -594,6 +731,29 @@ export default function OrdersPage() {
                     boxSizing: 'border-box'
                   }}
                 />
+                <button
+                  type="button"
+                  onClick={handleGeocodeStoreAddress}
+                  disabled={isGeocodingAddress}
+                  style={{
+                    marginTop: '0.45rem',
+                    background: '#2563eb',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '8px',
+                    padding: '0.45rem 0.8rem',
+                    fontSize: '0.82rem',
+                    fontWeight: 700,
+                    cursor: isGeocodingAddress ? 'not-allowed' : 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    opacity: isGeocodingAddress ? 0.7 : 1
+                  }}
+                >
+                  <span>{isGeocodingAddress ? '⏳' : '🔍'}</span>
+                  <span>{isGeocodingAddress ? 'Locating...' : 'Locate Address on Map (Geocode)'}</span>
+                </button>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem', marginBottom: '1rem' }}>
@@ -607,6 +767,13 @@ export default function OrdersPage() {
                     required
                     value={shopSettings.lat}
                     onChange={(e) => setShopSettings(prev => ({ ...prev, lat: e.target.value }))}
+                    onBlur={() => {
+                      const lt = parseFloat(shopSettings.lat);
+                      const lg = parseFloat(shopSettings.lng);
+                      if (!isNaN(lt) && !isNaN(lg) && lt >= -90 && lt <= 90 && lg >= -180 && lg <= 180) {
+                        handleReverseGeocodeStoreCoords(lt, lg);
+                      }
+                    }}
                     style={{
                       width: '100%',
                       padding: '0.7rem 0.9rem',
@@ -628,6 +795,13 @@ export default function OrdersPage() {
                     required
                     value={shopSettings.lng}
                     onChange={(e) => setShopSettings(prev => ({ ...prev, lng: e.target.value }))}
+                    onBlur={() => {
+                      const lt = parseFloat(shopSettings.lat);
+                      const lg = parseFloat(shopSettings.lng);
+                      if (!isNaN(lt) && !isNaN(lg) && lt >= -90 && lt <= 90 && lg >= -180 && lg <= 180) {
+                        handleReverseGeocodeStoreCoords(lt, lg);
+                      }
+                    }}
                     style={{
                       width: '100%',
                       padding: '0.7rem 0.9rem',
@@ -665,7 +839,7 @@ export default function OrdersPage() {
                 </span>
               </div>
 
-              <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.2rem' }}>
+              <div style={{ marginBottom: '1.2rem' }}>
                 <button
                   type="button"
                   onClick={handleDetectGPS}
@@ -686,7 +860,7 @@ export default function OrdersPage() {
                   }}
                 >
                   <span>📡</span>
-                  <span>Use Device GPS Coords</span>
+                  <span>Detect GPS Coords</span>
                 </button>
               </div>
 

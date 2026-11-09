@@ -27,6 +27,9 @@ export default function SignUpForm({ onSignUpSuccess }) {
   const [password, setPassword] = useState('');
   const [address, setAddress] = useState('');
   const [coords, setCoords] = useState(null); // { lat, lng, formatted }
+  const [fixedCoords, setFixedCoords] = useState(null);
+
+
   const mapRef = useRef(null);
   const leafletMapRef = useRef(null);
   const markerRef = useRef(null);
@@ -57,13 +60,16 @@ export default function SignUpForm({ onSignUpSuccess }) {
     try {
       const result = await geocodeAddress(address.trim());
       setCoords(result);
+      // Capture the first successful geocode as the immutable signup location
+      setFixedCoords((prev) => prev ?? result);
 
-      // Perform radius check against shop settings.
+      // Use the immutable location for radius validation
+      const locationToCheck = fixedCoords ?? result;
       if (shopSettings?.lat && shopSettings?.lng) {
         const maxRadius = shopSettings?.radiusKm || 5; // km fallback
         const { allowed, distanceKm } = isWithinDeliveryArea(
-          result.lat,
-          result.lng,
+          locationToCheck.lat,
+          locationToCheck.lng,
           { lat: shopSettings.lat, lng: shopSettings.lng },
           maxRadius
         );

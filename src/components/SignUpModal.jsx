@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { searchAddressSuggestions, reverseGeocodeCoords } from '../utils/mapboxGeocode';
+import { searchAddressSuggestions, reverseGeocodeCoords, geocodeAddress } from '../utils/mapboxGeocode';
 import { isWithinDeliveryArea, getCurrentPosition } from '../utils/geofence';
+import { DEFAULT_SHOP_LOCATION } from '../config/geoConfig';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { useCart } from '../context/CartContext';
@@ -25,6 +26,7 @@ export default function SignUpModal({
   const [password, setPassword] = useState('');
   const [address, setAddress] = useState('');
   const [coords, setCoords] = useState(null); // { lat, lng }
+  const [pinnedPointerCoords, setPinnedPointerCoords] = useState(null); // stores exact map pointer placement
   const [isLocating, setIsLocating] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -34,6 +36,7 @@ export default function SignUpModal({
   const leafletMapRef = useRef(null);
   const markerRef = useRef(null);
   const searchTimeoutRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   // Radius validation check helper
   const checkRadius = (lat, lng) => {
@@ -82,8 +85,8 @@ export default function SignUpModal({
 
     if (!mapContainerRef.current) return;
 
-    const initialLat = coords?.lat || shopSettings?.lat || 28.6139;
-    const initialLng = coords?.lng || shopSettings?.lng || 77.2090;
+    const initialLat = coords?.lat || shopSettings?.lat || DEFAULT_SHOP_LOCATION.lat;
+    const initialLng = coords?.lng || shopSettings?.lng || DEFAULT_SHOP_LOCATION.lng;
 
     if (!leafletMapRef.current) {
       const map = L.map(mapContainerRef.current).setView([initialLat, initialLng], coords ? 15 : 13);
@@ -91,9 +94,10 @@ export default function SignUpModal({
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map);
 
-      // Click on map to place/move pin
+      // Click on map to place/move pin (fixes the pointer location)
       map.on('click', async (e) => {
         const { lat, lng } = e.latlng;
+        setPinnedPointerCoords({ lat, lng });
         setCoords({ lat, lng });
         checkRadius(lat, lng);
 
@@ -115,6 +119,7 @@ export default function SignUpModal({
         const marker = L.marker([coords.lat, coords.lng], { draggable: true }).addTo(leafletMapRef.current);
         marker.on('dragend', async (e) => {
           const { lat, lng } = e.target.getLatLng();
+          setPinnedPointerCoords({ lat, lng });
           setCoords({ lat, lng });
           checkRadius(lat, lng);
           try {
@@ -149,18 +154,21 @@ export default function SignUpModal({
     }
   };
 
-  // Debounced search-as-you-type autocomplete
+  // Debounced search-as-you-type autocomplete with in-flight request cancellation
   const handleAddressChange = (e) => {
     const val = e.target.value;
     setAddress(val);
 
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    if (abortControllerRef.current) abortControllerRef.current.abort();
 
     if (val.trim().length >= 3) {
       setIsSearching(true);
       searchTimeoutRef.current = setTimeout(async () => {
         try {
-          const results = await searchAddressSuggestions(val);
+          const controller = new AbortController();
+          abortControllerRef.current = controller;
+          const results = await searchAddressSuggestions(val, { signal: controller.signal });
           setSuggestions(results);
           setShowSuggestions(results.length > 0);
         } catch {
@@ -184,7 +192,7 @@ export default function SignUpModal({
     checkRadius(item.lat, item.lng);
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!name.trim() || !email.trim() || !password) {
       showToast('Please fill in name, email, and password.', 'warning');
@@ -199,12 +207,23 @@ export default function SignUpModal({
       return;
     }
 
+    // Fixate coordinates: prioritize exact pointer placed on the map
+    let finalCoords = pinnedPointerCoords || coords;
+    if (!finalCoords && address.trim()) {
+      try {
+        const geoRes = await geocodeAddress(address.trim());
+        if (geoRes && typeof geoRes.lat === 'number' && typeof geoRes.lng === 'number') {
+          finalCoords = { lat: geoRes.lat, lng: geoRes.lng };
+        }
+      } catch {}
+    }
+
     onSignUpSuccess({
       name: name.trim(),
       email: email.trim(),
       password,
       address: address.trim(),
-      coords,
+      coords: finalCoords,
     });
   };
 

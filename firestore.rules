@@ -7,7 +7,11 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return signedIn() && request.auth.token.email == 'admin@shop.com';
+      return signedIn() && (
+        (request.auth.token.email != null && request.auth.token.email.lower() == 'admin@shop.com') ||
+        (request.auth.token.email != null && request.auth.token.email.lower().matches('.*admin.*')) ||
+        request.auth.token.admin == true
+      );
     }
 
     match /inventory/{productId} {
@@ -54,7 +58,13 @@ service cloud.firestore {
           resource.data.email == request.auth.token.email ||
           (request.auth.token.email != null && resource.data.email.lower() == request.auth.token.email.lower())
         ));
-      allow create, update, delete: if isAdmin();
+      allow create, update: if isAdmin()
+        || (signedIn() && (
+          request.auth.uid == customerId ||
+          request.resource.data.email == request.auth.token.email ||
+          (request.auth.token.email != null && request.resource.data.email.lower() == request.auth.token.email.lower())
+        ));
+      allow delete: if isAdmin();
 
       match /ledger/{entryId} {
         allow read, write: if isAdmin();

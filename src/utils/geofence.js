@@ -1,3 +1,5 @@
+import { DEFAULT_SHOP_LOCATION, DEFAULT_DELIVERY_RADIUS_KM } from '../config/geoConfig.js';
+
 // Haversine formula — calculates great-circle distance between two lat/lng coordinates in km
 export function getDistanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371; // Earth's mean radius in km
@@ -13,15 +15,11 @@ export function getDistanceKm(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Shop coordinates configured in environment
-export const SHOP_LOCATION = {
-  lat: parseFloat(import.meta.env.VITE_SHOP_LAT) || 28.6139,
-  lng: parseFloat(import.meta.env.VITE_SHOP_LNG) || 77.2090,
-};
+// Default shop coordinates from centralized config
+export const SHOP_LOCATION = DEFAULT_SHOP_LOCATION;
 
-// Configured maximum delivery radius in kilometers
-export const DELIVERY_RADIUS_KM =
-  parseFloat(import.meta.env.VITE_DELIVERY_RADIUS_KM) || 5;
+// Default maximum delivery radius from centralized config
+export const DELIVERY_RADIUS_KM = DEFAULT_DELIVERY_RADIUS_KM;
 
 /**
  * Validates whether the given customer coordinates fall within the shop delivery radius.

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Routes, Route, Link, NavLink } from 'react-router-dom';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { createUserWithEmailAndPassword, sendEmailVerification, signInWithEmailAndPassword } from 'firebase/auth';
 import { auth, db } from './firebase/config';
 
@@ -13,7 +13,7 @@ import OrdersPage from './pages/OrdersPage';
 import LoginModal from './components/LoginModal';
 import SignUpModal from './components/SignUpModal';
 import { getCurrentPosition, isWithinDeliveryArea, DELIVERY_RADIUS_KM } from './utils/geofence';
-import { reverseGeocodeCoords } from './utils/mapboxGeocode';
+import { reverseGeocodeCoords, geocodeAddress, updateCustomerLocation } from './utils/mapboxGeocode';
 
 const CUSTOMER_DRAFT_STORAGE_KEY = 'shop_storefront_customer_draft';
 
@@ -129,7 +129,15 @@ const StorefrontPage = () => {
   const [enteredOtp, setEnteredOtp] = useState(['', '', '', '', '', '']);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [isCheckingLocation, setIsCheckingLocation] = useState(false);
-  const [customerLocation, setCustomerLocation] = useState(null);
+  const [customerLocation, setCustomerLocation] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('shop_fixed_signup_location') || '{}');
+      if (typeof saved.lat === 'number' && typeof saved.lng === 'number') {
+        return saved;
+      }
+    } catch {}
+    return null;
+  });
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isSignUpModalOpen, setIsSignUpModalOpen] = useState(false);
@@ -206,6 +214,59 @@ const StorefrontPage = () => {
         contact: matchedData.contact || prev?.contact || targetEmail,
         address: matchedData.address || prev?.address || ''
       }));
+
+      // Reuse one-time geocoded coordinates stored on customer document
+      if (typeof matchedData.lat === 'number' && typeof matchedData.lng === 'number') {
+        const dist = isWithinDeliveryArea(
+          matchedData.lat,
+          matchedData.lng,
+          { lat: shopSettings?.lat, lng: shopSettings?.lng },
+          shopSettings?.radiusKm || DELIVERY_RADIUS_KM
+        ).distanceKm;
+        const locPayload = {
+          lat: matchedData.lat,
+          lng: matchedData.lng,
+          address: matchedData.address || '',
+          distanceKm: dist,
+          isFixated: true
+        };
+        setCustomerLocation(locPayload);
+        try {
+          localStorage.setItem('shop_fixed_signup_location', JSON.stringify(locPayload));
+        } catch {}
+      } else if (matchedData.address && matchedData.address.trim()) {
+        // One-time geocode for legacy customer without coordinates, updating customer doc in-place
+        try {
+          const geoRes = await geocodeAddress(matchedData.address.trim());
+          if (geoRes && typeof geoRes.lat === 'number' && typeof geoRes.lng === 'number') {
+            const dist = isWithinDeliveryArea(
+              geoRes.lat,
+              geoRes.lng,
+              { lat: shopSettings?.lat, lng: shopSettings?.lng },
+              shopSettings?.radiusKm || DELIVERY_RADIUS_KM
+            ).distanceKm;
+            const updatedLoc = {
+              lat: geoRes.lat,
+              lng: geoRes.lng,
+              address: geoRes.formatted || matchedData.address,
+              distanceKm: dist,
+              isFixated: true
+            };
+            setCustomerLocation(updatedLoc);
+            try {
+              localStorage.setItem('shop_fixed_signup_location', JSON.stringify(updatedLoc));
+            } catch {}
+            // Update existing customer document directly without creating new collections
+            await updateCustomerLocation(match.id, {
+              lat: geoRes.lat,
+              lng: geoRes.lng,
+              address: geoRes.formatted || matchedData.address
+            });
+          }
+        } catch (geoErr) {
+          console.warn('Could not auto-geocode customer address:', geoErr);
+        }
+      }
     } catch (error) {
       console.warn('Unable to sync customer name from email:', error);
     }
@@ -277,12 +338,35 @@ const StorefrontPage = () => {
         address,
       });
 
-      if (coords) {
-        setCustomerLocation({
+      if (coords && typeof coords.lat === 'number' && typeof coords.lng === 'number') {
+        const dist = isWithinDeliveryArea(coords.lat, coords.lng, { lat: shopSettings?.lat, lng: shopSettings?.lng }, shopSettings?.radiusKm || DELIVERY_RADIUS_KM).distanceKm;
+        const fixedPayload = {
           lat: coords.lat,
           lng: coords.lng,
-          distanceKm: isWithinDeliveryArea(coords.lat, coords.lng, { lat: shopSettings?.lat, lng: shopSettings?.lng }, shopSettings?.radiusKm || DELIVERY_RADIUS_KM).distanceKm
-        });
+          distanceKm: dist,
+          address: address || '',
+          isFixated: true
+        };
+        setCustomerLocation(fixedPayload);
+        try {
+          localStorage.setItem('shop_fixed_signup_location', JSON.stringify(fixedPayload));
+        } catch {}
+      }
+
+      // Persist customer record with one-time geocoded coordinates in Firestore (/customers/{uid})
+      try {
+        const customerDocRef = doc(db, 'customers', user.uid);
+        await setDoc(customerDocRef, {
+          name,
+          email,
+          contact: email,
+          address: address || '',
+          lat: coords?.lat ?? null,
+          lng: coords?.lng ?? null,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      } catch (saveErr) {
+        console.warn('Could not persist customer location to Firestore:', saveErr);
       }
 
       setIsSignUpModalOpen(false);
@@ -411,6 +495,7 @@ const StorefrontPage = () => {
   };
 
   // Trigger Checkout with Geofence Location Validation
+  // Uses the fixated location confirmed during signup (where pointer is pointed on map)
   const handleProceedToCheckout = async () => {
     if (cart.length === 0) {
       showToast("Your cart is empty!", "error");
@@ -423,45 +508,104 @@ const StorefrontPage = () => {
     showToast("📍 Verifying delivery location...", "info");
 
     try {
-      const coords = await getCurrentPosition();
       const shopCoords = { lat: shopSettings?.lat, lng: shopSettings?.lng };
       const maxRadius = shopSettings?.radiusKm || DELIVERY_RADIUS_KM;
-      const { allowed, distanceKm } = isWithinDeliveryArea(coords.lat, coords.lng, shopCoords, maxRadius);
 
-      if (!allowed) {
-        showToast(
-          `🛑 Delivery unavailable – you are ${distanceKm.toFixed(1)} km away, outside the ${maxRadius} km delivery zone. Order cannot be placed.`,
-          "error"
-        );
+      // 1. Locate fixated signup coordinates (from state, verifiedCustomer, or localStorage)
+      let fixatedLoc = null;
+      if (customerLocation?.lat && customerLocation?.lng) {
+        fixatedLoc = { lat: Number(customerLocation.lat), lng: Number(customerLocation.lng), address: customerLocation.address };
+      } else if (verifiedCustomer?.location?.lat && verifiedCustomer?.location?.lng) {
+        fixatedLoc = { lat: Number(verifiedCustomer.location.lat), lng: Number(verifiedCustomer.location.lng), address: verifiedCustomer.address };
+      } else {
+        try {
+          const stored = JSON.parse(localStorage.getItem('shop_fixed_signup_location') || '{}');
+          if (typeof stored.lat === 'number' && typeof stored.lng === 'number') {
+            fixatedLoc = { lat: stored.lat, lng: stored.lng, address: stored.address };
+          }
+        } catch {}
+      }
+
+      // If fixated signup location exists, validate against shop boundary without calling GPS
+      if (fixatedLoc && typeof fixatedLoc.lat === 'number' && typeof fixatedLoc.lng === 'number') {
+        const { allowed, distanceKm } = isWithinDeliveryArea(fixatedLoc.lat, fixatedLoc.lng, shopCoords, maxRadius);
+
+        if (!allowed) {
+          showToast(
+            `🛑 Delivery unavailable – your signup location is ${distanceKm.toFixed(1)} km away, outside the ${maxRadius} km delivery zone.`,
+            "error"
+          );
+          setIsCheckingLocation(false);
+          return;
+        }
+
+        setCustomerLocation({
+          lat: fixatedLoc.lat,
+          lng: fixatedLoc.lng,
+          distanceKm,
+          isFixated: true
+        });
+
+        if (fixatedLoc.address && !customerForm.address) {
+          setCustomerForm(prev => ({ ...prev, address: fixatedLoc.address }));
+        }
+
+        showToast(`📍 Delivery location verified (${distanceKm} km from shop).`, "success");
         setIsCheckingLocation(false);
+        setOtpStep(1);
+        setEnteredOtp(['', '', '', '', '', '']);
+        setIsCartOpen(false);
+        setIsOtpModalOpen(true);
         return;
       }
 
-      setCustomerLocation({
-        lat: coords.lat,
-        lng: coords.lng,
-        distanceKm,
-      });
-
-      // Auto-fill delivery address from reverse geocoded coordinates
-      try {
-        const resolvedAddr = await reverseGeocodeCoords(coords.lat, coords.lng);
-        if (resolvedAddr) {
-          setCustomerForm(prev => ({
-            ...prev,
-            address: resolvedAddr,
-          }));
+      // 2. If coordinates are not fixated yet but an address exists, run one-time geocoding and update customer doc in-place
+      const fallbackAddress = customerForm.address?.trim() || verifiedCustomer?.address?.trim();
+      if (fallbackAddress) {
+        try {
+          const geoRes = await geocodeAddress(fallbackAddress);
+          if (geoRes && typeof geoRes.lat === 'number' && typeof geoRes.lng === 'number') {
+            const { allowed, distanceKm } = isWithinDeliveryArea(geoRes.lat, geoRes.lng, shopCoords, maxRadius);
+            if (!allowed) {
+              showToast(
+                `🛑 Delivery unavailable – your address is ${distanceKm.toFixed(1)} km away, outside the ${maxRadius} km delivery zone.`,
+                "error"
+              );
+              setIsCheckingLocation(false);
+              return;
+            }
+            const verifiedPayload = {
+              lat: geoRes.lat,
+              lng: geoRes.lng,
+              address: geoRes.formatted || fallbackAddress,
+              distanceKm,
+              isFixated: true
+            };
+            setCustomerLocation(verifiedPayload);
+            try {
+              localStorage.setItem('shop_fixed_signup_location', JSON.stringify(verifiedPayload));
+            } catch {}
+            if (auth.currentUser?.uid) {
+              await updateCustomerLocation(auth.currentUser.uid, verifiedPayload);
+            }
+            showToast(`📍 Delivery location verified (${distanceKm} km from shop).`, "success");
+            setIsCheckingLocation(false);
+            setOtpStep(1);
+            setEnteredOtp(['', '', '', '', '', '']);
+            setIsCartOpen(false);
+            setIsOtpModalOpen(true);
+            return;
+          }
+        } catch (geoErr) {
+          console.warn('Fallback geocoding during checkout failed:', geoErr);
         }
-      } catch (geocodeErr) {
-        console.warn('Could not reverse geocode checkout coords:', geocodeErr);
       }
 
-      showToast(`📍 Delivery location confirmed (${distanceKm} km away).`, "success");
+      // If no signup location is fixated yet, open SignUpModal so customer can point on map
       setIsCheckingLocation(false);
-      setOtpStep(1);
-      setEnteredOtp(['', '', '', '', '', '']);
       setIsCartOpen(false);
-      setIsOtpModalOpen(true);
+      setIsSignUpModalOpen(true);
+      showToast("Please select your delivery location on the map to proceed.", "info");
     } catch (err) {
       setIsCheckingLocation(false);
       showToast(`📍 ${err.message}`, "error");

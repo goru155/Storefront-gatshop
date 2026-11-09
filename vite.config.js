@@ -133,6 +133,10 @@ export default defineConfig(({ mode }) => {
     VITE_FIREBASE_APP_ID: env.VITE_FIREBASE_APP_ID || '',
     VITE_FIREBASE_MEASUREMENT_ID: env.VITE_FIREBASE_MEASUREMENT_ID || '',
     VITE_ADMIN_EMAIL: env.VITE_ADMIN_EMAIL || 'admin@shop.com',
+    VITE_SHOP_LAT: env.VITE_SHOP_LAT || '28.6139',
+    VITE_SHOP_LNG: env.VITE_SHOP_LNG || '77.2090',
+    VITE_DELIVERY_RADIUS_KM: env.VITE_DELIVERY_RADIUS_KM || '5',
+    VITE_MAPBOX_TOKEN: env.VITE_MAPBOX_TOKEN || '',
   };
 
   return {
