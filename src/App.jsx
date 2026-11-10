@@ -12,6 +12,7 @@ import { getCategoryIcon } from './firebase/config';
 import OrdersPage from './pages/OrdersPage';
 import LoginModal from './components/LoginModal';
 import SignUpModal from './components/SignUpModal';
+import ProfileModal from './components/ProfileModal';
 import { getCurrentPosition, isWithinDeliveryArea, DELIVERY_RADIUS_KM } from './utils/geofence';
 import { reverseGeocodeCoords, geocodeAddress, updateCustomerLocation } from './utils/mapboxGeocode';
 
@@ -209,6 +210,7 @@ const StorefrontPage = () => {
 
       setVerifiedCustomer(prev => ({
         ...(prev || {}),
+        id: match.id,
         name: resolvedName,
         email: targetEmail,
         contact: matchedData.contact || prev?.contact || targetEmail,
@@ -382,6 +384,19 @@ const StorefrontPage = () => {
   };
 
   const handleCloseProfileModal = () => setIsProfileModalOpen(false);
+
+  const handleProfileAddressUpdated = (updatedPayload) => {
+    setCustomerLocation(updatedPayload);
+    setVerifiedCustomer(prev => ({
+      ...(prev || {}),
+      address: updatedPayload.address,
+      location: { lat: updatedPayload.lat, lng: updatedPayload.lng }
+    }));
+    setCustomerForm(prev => ({
+      ...prev,
+      address: updatedPayload.address
+    }));
+  };
 
   const handleSignOutProfile = async () => {
     explicitSignOutRef.current = true;
@@ -1271,54 +1286,18 @@ const StorefrontPage = () => {
       )}
 
       {/* ===================================================================
-          OTP Verification & Order Checkout Modal
+          Profile Details & Delivery Address Update Modal
           =================================================================== */}
-      {isProfileModalOpen && (
-        <div className="modal-overlay" onClick={handleCloseProfileModal}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div className="modal-icon-badge">👤</div>
-              <h3 className="modal-title">My Profile</h3>
-              <p className="modal-subtitle">
-                {currentUserName !== 'User' ? `Welcome back, ${currentUserName}.` : 'Your account details are shown here.'}
-              </p>
-            </div>
-
-            <div style={{ display: 'grid', gap: '0.85rem', marginBottom: '1.2rem' }}>
-              <div className="detail-box" style={{ padding: '0.9rem 1rem', borderRadius: '12px', background: 'var(--bg-mist)' }}>
-                <h4 style={{ margin: '0 0 0.3rem', fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Name</h4>
-                <div style={{ fontWeight: 700 }}>{verifiedCustomer?.name || customerForm.name || currentUserName}</div>
-              </div>
-
-              <div className="detail-box" style={{ padding: '0.9rem 1rem', borderRadius: '12px', background: 'var(--bg-mist)' }}>
-                <h4 style={{ margin: '0 0 0.3rem', fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Email</h4>
-                <div>{verifiedCustomer?.email || customerForm.email || auth.currentUser?.email || 'Not provided'}</div>
-              </div>
-
-              <div className="detail-box" style={{ padding: '0.9rem 1rem', borderRadius: '12px', background: 'var(--bg-mist)' }}>
-                <h4 style={{ margin: '0 0 0.3rem', fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Contact</h4>
-                <div>{verifiedCustomer?.contact || customerForm.contact || 'Not provided'}</div>
-              </div>
-
-              <div className="detail-box" style={{ padding: '0.9rem 1rem', borderRadius: '12px', background: 'var(--bg-mist)' }}>
-                <h4 style={{ margin: '0 0 0.3rem', fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Delivery Address</h4>
-                <div>{verifiedCustomer?.address || customerForm.address || 'Not provided'}</div>
-              </div>
-            </div>
-
-            <div className="modal-actions">
-              <button type="button" className="btn-modal-cancel" onClick={handleCloseProfileModal}>
-                Close
-              </button>
-              {auth.currentUser && (
-                <button type="button" className="btn-modal-primary" onClick={handleSignOutProfile}>
-                  Sign Out
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <ProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={handleCloseProfileModal}
+        currentUserName={currentUserName}
+        verifiedCustomer={verifiedCustomer}
+        customerForm={customerForm}
+        customerLocation={customerLocation}
+        onAddressUpdated={handleProfileAddressUpdated}
+        onSignOut={handleSignOutProfile}
+      />
 
       {isOtpModalOpen && (
         <div className="modal-overlay" onClick={handleCloseOtpModal}>
