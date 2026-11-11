@@ -13,6 +13,7 @@ import OrdersPage from './pages/OrdersPage';
 import LoginModal from './components/LoginModal';
 import SignUpModal from './components/SignUpModal';
 import ProfileModal from './components/ProfileModal';
+import AddressForm from './components/AddressForm';
 import { getCurrentPosition, isWithinDeliveryArea, DELIVERY_RADIUS_KM } from './utils/geofence';
 import { reverseGeocodeCoords, geocodeAddress, updateCustomerLocation } from './utils/mapboxGeocode';
 
@@ -132,13 +133,75 @@ const StorefrontPage = () => {
   const [isCheckingLocation, setIsCheckingLocation] = useState(false);
   const [customerLocation, setCustomerLocation] = useState(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem('shop_fixed_signup_location') || '{}');
-      if (typeof saved.lat === 'number' && typeof saved.lng === 'number') {
-        return saved;
+      const lock = JSON.parse(localStorage.getItem('shop_checkout_location_lock') || '{}');
+      if (lock?.lockedUntil && Number(lock.lockedUntil) > Date.now()) {
+        return lock;
       }
     } catch {}
     return null;
   });
+
+  // 20-minute post-checkout location lock state
+  const [locationLock, setLocationLock] = useState(() => {
+    try {
+      const raw = localStorage.getItem('shop_checkout_location_lock');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed?.lockedUntil && Number(parsed.lockedUntil) > Date.now()) {
+        return parsed;
+      }
+    } catch {}
+    return null;
+  });
+
+  const [lockTimeRemaining, setLockTimeRemaining] = useState(() => {
+    try {
+      const raw = localStorage.getItem('shop_checkout_location_lock');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed?.lockedUntil && Number(parsed.lockedUntil) > Date.now()) {
+        const sec = Math.floor((parsed.lockedUntil - Date.now()) / 1000);
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+      }
+    } catch {}
+    return null;
+  });
+
+  const isLocationLocked = Boolean(locationLock && lockTimeRemaining);
+
+  // Monitor 20-minute location lock countdown every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      try {
+        const raw = localStorage.getItem('shop_checkout_location_lock');
+        if (!raw) {
+          if (locationLock) setLocationLock(null);
+          if (lockTimeRemaining) setLockTimeRemaining(null);
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        const diffMs = (parsed?.lockedUntil ? Number(parsed.lockedUntil) : 0) - Date.now();
+        if (diffMs > 0) {
+          const totalSec = Math.floor(diffMs / 1000);
+          const m = Math.floor(totalSec / 60);
+          const s = totalSec % 60;
+          setLockTimeRemaining(`${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+          if (!locationLock) setLocationLock(parsed);
+        } else {
+          localStorage.removeItem('shop_checkout_location_lock');
+          setLocationLock(null);
+          setLockTimeRemaining(null);
+        }
+      } catch {
+        setLocationLock(null);
+        setLockTimeRemaining(null);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [locationLock, lockTimeRemaining]);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isSignUpModalOpen, setIsSignUpModalOpen] = useState(false);
@@ -313,8 +376,8 @@ const StorefrontPage = () => {
     handleOpenSignUpModal();
   };
 
-  // Handle customer registration from SignUpModal
-  const handleSignUpSubmit = async ({ name, email, password, address, coords }) => {
+  // Handle customer registration from SignUpModal (Name, Email, Password only - no delivery address)
+  const handleSignUpSubmit = async ({ name, email, password }) => {
     try {
       let userCredential;
       try {
@@ -331,44 +394,26 @@ const StorefrontPage = () => {
       const user = userCredential.user;
       await sendEmailVerification(user);
 
-      // Save customer details into local state & draft
-      setCustomerForm({
+      // Save customer details into local state & draft (no address on signup)
+      setCustomerForm(prev => ({
+        ...prev,
         name,
         email,
         contact: email,
         password: '',
-        address,
-      });
+      }));
 
-      if (coords && typeof coords.lat === 'number' && typeof coords.lng === 'number') {
-        const dist = isWithinDeliveryArea(coords.lat, coords.lng, { lat: shopSettings?.lat, lng: shopSettings?.lng }, shopSettings?.radiusKm || DELIVERY_RADIUS_KM).distanceKm;
-        const fixedPayload = {
-          lat: coords.lat,
-          lng: coords.lng,
-          distanceKm: dist,
-          address: address || '',
-          isFixated: true
-        };
-        setCustomerLocation(fixedPayload);
-        try {
-          localStorage.setItem('shop_fixed_signup_location', JSON.stringify(fixedPayload));
-        } catch {}
-      }
-
-      // Persist customer record with one-time geocoded coordinates in Firestore (/customers/{uid})
+      // Persist customer record in Firestore (/customers/{uid}) without delivery address
       try {
         const customerDocRef = doc(db, 'customers', user.uid);
         await setDoc(customerDocRef, {
           name,
           email,
           contact: email,
-          address: address || '',
-          lat: coords?.lat ?? null,
-          lng: coords?.lng ?? null,
           updatedAt: serverTimestamp()
         }, { merge: true });
       } catch (saveErr) {
-        console.warn('Could not persist customer location to Firestore:', saveErr);
+        console.warn('Could not persist customer to Firestore:', saveErr);
       }
 
       setIsSignUpModalOpen(false);
@@ -384,19 +429,6 @@ const StorefrontPage = () => {
   };
 
   const handleCloseProfileModal = () => setIsProfileModalOpen(false);
-
-  const handleProfileAddressUpdated = (updatedPayload) => {
-    setCustomerLocation(updatedPayload);
-    setVerifiedCustomer(prev => ({
-      ...(prev || {}),
-      address: updatedPayload.address,
-      location: { lat: updatedPayload.lat, lng: updatedPayload.lng }
-    }));
-    setCustomerForm(prev => ({
-      ...prev,
-      address: updatedPayload.address
-    }));
-  };
 
   const handleSignOutProfile = async () => {
     explicitSignOutRef.current = true;
@@ -509,122 +541,33 @@ const StorefrontPage = () => {
     scrollToProducts();
   };
 
-  // Trigger Checkout with Geofence Location Validation
-  // Uses the fixated location confirmed during signup (where pointer is pointed on map)
-  const handleProceedToCheckout = async () => {
+  // Trigger Checkout: Directly opens the checkout verification modal
+  // If a location lock exists from checkout in the last 20 minutes, it remains locked
+  const handleProceedToCheckout = () => {
     if (cart.length === 0) {
       showToast("Your cart is empty!", "error");
       return;
     }
 
-    if (isCheckingLocation) return;
-
-    setIsCheckingLocation(true);
-    showToast("📍 Verifying delivery location...", "info");
-
+    // Check if location is locked from a checkout in the last 20 mins
     try {
-      const shopCoords = { lat: shopSettings?.lat, lng: shopSettings?.lng };
-      const maxRadius = shopSettings?.radiusKm || DELIVERY_RADIUS_KM;
-
-      // 1. Locate fixated signup coordinates (from state, verifiedCustomer, or localStorage)
-      let fixatedLoc = null;
-      if (customerLocation?.lat && customerLocation?.lng) {
-        fixatedLoc = { lat: Number(customerLocation.lat), lng: Number(customerLocation.lng), address: customerLocation.address };
-      } else if (verifiedCustomer?.location?.lat && verifiedCustomer?.location?.lng) {
-        fixatedLoc = { lat: Number(verifiedCustomer.location.lat), lng: Number(verifiedCustomer.location.lng), address: verifiedCustomer.address };
-      } else {
-        try {
-          const stored = JSON.parse(localStorage.getItem('shop_fixed_signup_location') || '{}');
-          if (typeof stored.lat === 'number' && typeof stored.lng === 'number') {
-            fixatedLoc = { lat: stored.lat, lng: stored.lng, address: stored.address };
+      const raw = localStorage.getItem('shop_checkout_location_lock');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.lockedUntil && Number(parsed.lockedUntil) > Date.now()) {
+          setLocationLock(parsed);
+          setCustomerLocation(parsed);
+          if (parsed.address) {
+            setCustomerForm(prev => ({ ...prev, address: parsed.address }));
           }
-        } catch {}
-      }
-
-      // If fixated signup location exists, validate against shop boundary without calling GPS
-      if (fixatedLoc && typeof fixatedLoc.lat === 'number' && typeof fixatedLoc.lng === 'number') {
-        const { allowed, distanceKm } = isWithinDeliveryArea(fixatedLoc.lat, fixatedLoc.lng, shopCoords, maxRadius);
-
-        if (!allowed) {
-          showToast(
-            `🛑 Delivery unavailable – your signup location is ${distanceKm.toFixed(1)} km away, outside the ${maxRadius} km delivery zone.`,
-            "error"
-          );
-          setIsCheckingLocation(false);
-          return;
-        }
-
-        setCustomerLocation({
-          lat: fixatedLoc.lat,
-          lng: fixatedLoc.lng,
-          distanceKm,
-          isFixated: true
-        });
-
-        if (fixatedLoc.address && !customerForm.address) {
-          setCustomerForm(prev => ({ ...prev, address: fixatedLoc.address }));
-        }
-
-        showToast(`📍 Delivery location verified (${distanceKm} km from shop).`, "success");
-        setIsCheckingLocation(false);
-        setOtpStep(1);
-        setEnteredOtp(['', '', '', '', '', '']);
-        setIsCartOpen(false);
-        setIsOtpModalOpen(true);
-        return;
-      }
-
-      // 2. If coordinates are not fixated yet but an address exists, run one-time geocoding and update customer doc in-place
-      const fallbackAddress = customerForm.address?.trim() || verifiedCustomer?.address?.trim();
-      if (fallbackAddress) {
-        try {
-          const geoRes = await geocodeAddress(fallbackAddress);
-          if (geoRes && typeof geoRes.lat === 'number' && typeof geoRes.lng === 'number') {
-            const { allowed, distanceKm } = isWithinDeliveryArea(geoRes.lat, geoRes.lng, shopCoords, maxRadius);
-            if (!allowed) {
-              showToast(
-                `🛑 Delivery unavailable – your address is ${distanceKm.toFixed(1)} km away, outside the ${maxRadius} km delivery zone.`,
-                "error"
-              );
-              setIsCheckingLocation(false);
-              return;
-            }
-            const verifiedPayload = {
-              lat: geoRes.lat,
-              lng: geoRes.lng,
-              address: geoRes.formatted || fallbackAddress,
-              distanceKm,
-              isFixated: true
-            };
-            setCustomerLocation(verifiedPayload);
-            try {
-              localStorage.setItem('shop_fixed_signup_location', JSON.stringify(verifiedPayload));
-            } catch {}
-            if (auth.currentUser?.uid) {
-              await updateCustomerLocation(auth.currentUser.uid, verifiedPayload);
-            }
-            showToast(`📍 Delivery location verified (${distanceKm} km from shop).`, "success");
-            setIsCheckingLocation(false);
-            setOtpStep(1);
-            setEnteredOtp(['', '', '', '', '', '']);
-            setIsCartOpen(false);
-            setIsOtpModalOpen(true);
-            return;
-          }
-        } catch (geoErr) {
-          console.warn('Fallback geocoding during checkout failed:', geoErr);
         }
       }
+    } catch {}
 
-      // If no signup location is fixated yet, open SignUpModal so customer can point on map
-      setIsCheckingLocation(false);
-      setIsCartOpen(false);
-      setIsSignUpModalOpen(true);
-      showToast("Please select your delivery location on the map to proceed.", "info");
-    } catch (err) {
-      setIsCheckingLocation(false);
-      showToast(`📍 ${err.message}`, "error");
-    }
+    setOtpStep(1);
+    setEnteredOtp(['', '', '', '', '', '']);
+    setIsCartOpen(false);
+    setIsOtpModalOpen(true);
   };
 
   const handleCloseOtpModal = () => {
@@ -639,7 +582,7 @@ const StorefrontPage = () => {
   const handleSendOtp = async (e) => {
     e.preventDefault();
     explicitSignOutRef.current = false;
-    if (!customerForm.name || !customerForm.email || !customerForm.address) {
+    if (!customerForm.name || !customerForm.email || !customerForm.address || !customerForm.address.trim()) {
       showToast("Please fill in your name, email, and delivery address.", "warning");
       return;
     }
@@ -648,6 +591,24 @@ const StorefrontPage = () => {
     if (!emailRegex.test(customerForm.email)) {
       showToast("Please enter a valid email address.", "warning");
       return;
+    }
+
+    // Geofence radius validation for delivery location
+    if (customerLocation?.lat && customerLocation?.lng && shopSettings?.lat && shopSettings?.lng) {
+      const maxRadius = shopSettings?.radiusKm || DELIVERY_RADIUS_KM;
+      const { allowed, distanceKm } = isWithinDeliveryArea(
+        customerLocation.lat,
+        customerLocation.lng,
+        { lat: shopSettings.lat, lng: shopSettings.lng },
+        maxRadius
+      );
+      if (!allowed) {
+        showToast(
+          `🛑 Cannot deliver: address is ${distanceKm.toFixed(1)} km away (outside the ${maxRadius} km delivery zone).`,
+          "error"
+        );
+        return;
+      }
     }
 
     try {
@@ -775,6 +736,22 @@ const StorefrontPage = () => {
       setIsSubmittingOrder(false);
 
       if (success) {
+        // Lock the delivery location for 20 minutes once checked out
+        const lockedUntil = Date.now() + 20 * 60 * 1000;
+        const lockPayload = {
+          address: normalizedCustomer.address,
+          lat: customerLocation?.lat ?? null,
+          lng: customerLocation?.lng ?? null,
+          distanceKm: customerLocation?.distanceKm ?? null,
+          lockedUntil,
+        };
+        try {
+          localStorage.setItem('shop_checkout_location_lock', JSON.stringify(lockPayload));
+        } catch (e) {
+          console.warn('Could not save location lock:', e);
+        }
+        setLocationLock(lockPayload);
+        setLockTimeRemaining('20:00');
         setOtpStep(3);
       }
     } catch (err) {
@@ -1286,7 +1263,7 @@ const StorefrontPage = () => {
       )}
 
       {/* ===================================================================
-          Profile Details & Delivery Address Update Modal
+          Profile Details Modal
           =================================================================== */}
       <ProfileModal
         isOpen={isProfileModalOpen}
@@ -1294,23 +1271,25 @@ const StorefrontPage = () => {
         currentUserName={currentUserName}
         verifiedCustomer={verifiedCustomer}
         customerForm={customerForm}
-        customerLocation={customerLocation}
-        onAddressUpdated={handleProfileAddressUpdated}
         onSignOut={handleSignOutProfile}
       />
 
       {isOtpModalOpen && (
         <div className="modal-overlay" onClick={handleCloseOtpModal}>
           <div id="otp-recaptcha-container"></div>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            {/* Step 1: Customer Details */}
+          <div
+            className="modal-card"
+            style={{ maxWidth: '500px', width: '92%', maxHeight: '90vh', overflowY: 'auto' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Step 1: Customer Details & Delivery Address */}
             {otpStep === 1 && (
               <form onSubmit={handleSendOtp}>
                 <div className="modal-header">
-                  <div className="modal-icon-badge">📱</div>
-                  <h3 className="modal-title">Customer Verification</h3>
+                  <div className="modal-icon-badge">📦</div>
+                  <h3 className="modal-title">Checkout Verification</h3>
                   <p className="modal-subtitle">
-                    Enter your contact details to receive a 6-digit verification code.
+                    Confirm your details and delivery location to complete your order.
                   </p>
                 </div>
 
@@ -1352,26 +1331,19 @@ const StorefrontPage = () => {
                   </div>
                 )}
 
-                <div className="form-group">
-                  <label className="form-label">Delivery Address</label>
-                  <input
-                    type="text"
-                    required
-                    readOnly={Boolean(customerLocation)}
-                    className="form-input"
-                    placeholder="e.g. 124 Main Street, Apartment 4B"
-                    value={customerForm.address}
-                    onChange={(e) => setCustomerForm({ ...customerForm, address: e.target.value })}
-                    style={customerLocation ? { backgroundColor: 'var(--bg-mist, #f8fafc)', cursor: 'not-allowed' } : {}}
-                  />
-                  {customerLocation && (
-                    <span style={{ fontSize: '0.78rem', color: '#16a34a', marginTop: '0.25rem', display: 'block' }}>
-                      🔒 Location confirmed ({customerLocation.distanceKm} km from shop)
-                    </span>
-                  )}
-                </div>
+                {/* Delivery Address & Location Selection (Exclusively at Checkout with 20-min window) */}
+                <AddressForm
+                  address={customerForm.address}
+                  coords={customerLocation}
+                  isLocked={isLocationLocked}
+                  lockTimeRemaining={lockTimeRemaining}
+                  onChange={({ address, coords, isWithinZone, distanceKm }) => {
+                    setCustomerForm(prev => ({ ...prev, address }));
+                    setCustomerLocation(coords ? { ...coords, address, distanceKm, isFixated: true } : null);
+                  }}
+                />
 
-                <div className="modal-actions">
+                <div className="modal-actions" style={{ marginTop: '1.25rem' }}>
                   <button type="button" className="btn-modal-cancel" onClick={handleCloseOtpModal}>
                     Cancel
                   </button>

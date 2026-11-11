@@ -55,6 +55,20 @@ export function CartProvider({ children }) {
     }
   });
 
+  // Delivery address state (used in checkout verification flow)
+  const [deliveryAddress, setDeliveryAddress] = useState(() => {
+    try {
+      const saved = localStorage.getItem('shop_checkout_location_lock');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.lockedUntil && Number(parsed.lockedUntil) > Date.now()) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return null;
+  });
+
   // 4. Cart Expiration Timer State (20 Minutes Max)
   const [expiresAt, setExpiresAt] = useState(() => {
     try {
@@ -591,6 +605,8 @@ export function CartProvider({ children }) {
       isTimerWarning,
       verifiedCustomer,
       setVerifiedCustomer,
+        deliveryAddress,
+        setDeliveryAddress,
       placeOrder,
       downloadOrderBill,
       isCartOpen,
